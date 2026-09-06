@@ -11,7 +11,7 @@ import os
 import re
 import tomllib
 from pathlib import Path
-from typing import Literal, Self
+from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -32,7 +32,6 @@ class ConfigError(ValueError):
 class ModelConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    provider: Literal["anthropic", "openai"]
     model: str = Field(min_length=1)
     base_url: str | None = None
     api_key_env: str = Field(min_length=1)
@@ -160,7 +159,6 @@ class Config(BaseModel):
         """Return a safe Config summary suitable for trace events."""
 
         return {
-            "provider": self.model.provider,
             "model": self.model.model,
             "base_url": self.model.base_url,
             "api_key_env": self.model.api_key_env,

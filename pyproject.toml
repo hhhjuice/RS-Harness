@@ -9,7 +9,6 @@ description = "A minimal model-backed harness for remote-sensing analysis agents
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "anthropic>=0.40,<1",
     "openai>=1.50,<2",
     "pydantic>=2.7,<3",
     "python-dotenv>=1.0,<2",
@@ -24,7 +23,7 @@ dev = [
 ]
 
 [project.scripts]
-rs-harness = "rs_harness.cli:main"
+rsh = "rs_harness.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

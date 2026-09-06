@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from rs_harness.config import Config, ConfigError
 
@@ -13,7 +14,6 @@ def test_config_loads_dotenv_and_resolves_paths(tmp_path, monkeypatch):
     config_file.write_text(
         """
 [model]
-provider = "openai"
 model = "gpt-test"
 api_key_env = "TEST_RS_KEY"
 [runtime]
@@ -26,17 +26,28 @@ dotenv_file = ".env"
     monkeypatch.delenv("TEST_RS_KEY", raising=False)
     config = Config.load(config_file)
 
-    assert config.model.provider == "openai"
+    assert config.model.model == "gpt-test"
     assert config.api_key() == "from-dotenv"
     assert config.runtime.sessions_dir == (tmp_path / "sessions").resolve()
     assert config.system_prompt() == "system"
+    assert "provider" not in config.summary()
 
 
 def test_missing_key_is_explicit(tmp_path, monkeypatch):
     monkeypatch.delenv("TEST_RS_KEY", raising=False)
     config = Config(
-        model={"provider": "anthropic", "model": "claude", "api_key_env": "TEST_RS_KEY"}
+        model={"model": "gpt-test", "api_key_env": "TEST_RS_KEY"}
     )
     with pytest.raises(ConfigError, match="Missing API key"):
         config.api_key()
 
+
+def test_provider_field_is_rejected():
+    with pytest.raises(ValidationError):
+        Config(
+            model={
+                "provider": "openai",
+                "model": "gpt-test",
+                "api_key_env": "TEST_RS_KEY",
+            }
+        )

@@ -1,5 +1,4 @@
 [model]
-provider = "openai"
 model = "gpt-4o-mini"
 base_url = ""
 api_key_env = "OPENAI_API_KEY"
@@ -13,4 +12,3 @@ max_turns = 1
 sessions_dir = "../sessions"
 system_prompt_file = "../prompts/system.md"
 dotenv_file = "../.env"
-
