@@ -1,0 +1,16 @@
+[model]
+provider = "openai"
+model = "gpt-4o-mini"
+base_url = ""
+api_key_env = "OPENAI_API_KEY"
+timeout_s = 60
+max_tokens = 4096
+
+[loop]
+max_turns = 1
+
+[runtime]
+sessions_dir = "../sessions"
+system_prompt_file = "../prompts/system.md"
+dotenv_file = "../.env"
+
