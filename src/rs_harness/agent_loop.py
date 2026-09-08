@@ -11,6 +11,7 @@ from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from .config import Config, ConfigError
+from .runtime.images import ImageAttachment
 from .runtime.messages import (
     assistant_turn,
     build_user_message_content,
@@ -328,18 +329,27 @@ def _execute_tool_calls(
     config: Config,
     tool_log: Callable[[str, str], None] | None,
 ) -> None:
+    image_attachments: list[ImageAttachment] = []
     for tool_id, tool_name, raw_arguments in tool_calls:
         arguments, argument_error = decode_tool_arguments(raw_arguments)
         if argument_error is not None:
             output = argument_error
         else:
             try:
-                output = dispatch_tool(
+                raw_output = dispatch_tool(
                     tool_name,
                     arguments,
                     workdir,
                     bash_timeout_s=config.loop.bash_timeout_s,
                 )
+                if isinstance(raw_output, ImageAttachment):
+                    image_attachments.append(raw_output)
+                    output = (
+                        f"Image loaded: {raw_output.path} "
+                        f"({raw_output.mime}, {raw_output.bytes} bytes)."
+                    )
+                else:
+                    output = str(raw_output)
             except Exception as exc:  # defensive: a tool must never break the loop
                 output = f"Error: Tool execution failed: {exc}"
         # A tool observation (e.g. ``env`` output) can echo the API
@@ -356,6 +366,24 @@ def _execute_tool_calls(
         session.append(tool_message)
         messages.append(tool_message)
 
+    if image_attachments:
+        paths = "\n".join(f"- {attachment.path}" for attachment in image_attachments)
+        image_message = {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "Images loaded by read_image and attached for visual inspection:\n"
+                        f"{paths}"
+                    ),
+                },
+                *(attachment.ref_block() for attachment in image_attachments),
+            ],
+        }
+        session.append(image_message)
+        messages.append(image_message)
+
 
 _TOOL_CONTEXT_MARKER = "RS-Harness tool context v1"
 
@@ -365,7 +393,8 @@ def _ensure_tool_context_unlocked(session: Session, workdir: str) -> None:
 
     content = (
         f"{_TOOL_CONTEXT_MARKER}\n"
-        "Available tools: bash, read_file, write_file, edit_file, glob.\n"
+        "Available tools: bash, read_file, write_file, edit_file, glob, read_image.\n"
+        "Use read_image for local image inspection; use glob first when the image path is unclear.\n"
         f"Working directory: {workdir}\n"
         "File-tool paths stay inside this directory. Tool results are observations; "
         "remote-sensing semantics remain behind MCP."

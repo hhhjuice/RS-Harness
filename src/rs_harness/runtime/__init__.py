@@ -11,6 +11,7 @@ from .tools import (
     run_edit,
     run_glob,
     run_read,
+    run_read_image,
     run_write,
     safe_path,
 )
@@ -32,4 +33,5 @@ __all__ = [
     "run_write",
     "run_edit",
     "run_glob",
+    "run_read_image",
 ]

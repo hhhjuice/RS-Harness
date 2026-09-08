@@ -39,11 +39,16 @@ Each session writes the following files under `sessions/<session_id>/`:
 * `messages.jsonl` — append-only, complete message ledger. Each record carries
   a sequence number, timestamp, and the provider message payload.
 
-The loop exposes five workspace tools to the model: `bash`, `read_file`,
-`write_file`, `edit_file`, and `glob`. File-tool paths and glob matches stay
+The loop exposes six workspace tools to the model: `bash`, `read_file`,
+`write_file`, `edit_file`, `glob`, and `read_image`. File-tool paths and glob matches stay
 inside the session workspace; tool failures are returned to the model as
 observations so it can recover. Tool observations are redacted against the
 configured API key before they reach the ledger, the model, or any log.
+
+When a user asks to inspect a local image without giving a path, the model can
+use `glob` to find it and then call `read_image`. The tool result is recorded as
+text and the image is attached to the next model request as an `image_url`
+content block; the ledger stores only an `image_ref` record.
 
 Images enter as standard vision input: pass a local JPEG/PNG/WebP/GIF file
 (≤ 20 MB) or an http(s) URL via `--image`, or simply paste a local image path
@@ -62,8 +67,8 @@ to obtain its generated `session_id`. Empty query and image input exits
 quietly; a closed session rejects further asks. A session with an incomplete
 historical tool call must be replaced rather than replaying the old action.
 
-The v0.1.0 loop provides `bash`, `read_file`, `write_file`, `edit_file`, and
-`glob` for general workspace tasks, plus vision input for web-format images.
+The v0.1.0 loop provides `bash`, `read_file`, `write_file`, `edit_file`, `glob`,
+and `read_image` for general workspace tasks, plus vision input for web-format images.
 MCP, Hooks, memory, context management, streaming, and remote-sensing raster
 processing remain out of scope; remote-sensing semantics stay
 behind the MCP boundary. Use `--workdir` to select the workspace for a session;

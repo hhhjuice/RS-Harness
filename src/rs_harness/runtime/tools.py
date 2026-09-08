@@ -10,6 +10,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from .images import ImageAttachment, inspect_local_image
+
 __all__ = [
     "TOOLS",
     "TOOL_HANDLERS",
@@ -18,6 +20,7 @@ __all__ = [
     "safe_path",
     "run_bash",
     "run_read",
+    "run_read_image",
     "run_write",
     "run_edit",
     "run_glob",
@@ -120,6 +123,21 @@ def run_read(path: str | Path, limit: int | None = None, workdir: str | Path | N
         return _truncate(f"Error: {exc}")
 
 
+def run_read_image(path: str | Path, workdir: str | Path | None = None) -> ImageAttachment | str:
+    """Load one local web image for the model's next visual context."""
+
+    try:
+        if not isinstance(path, (str, Path)):
+            return "Error: Invalid path: expected a string"
+        target = safe_path(path, workdir)
+        attachment, reason = inspect_local_image(target)
+        if attachment is None:
+            return _truncate(f"Error: Unable to read image {path}: {reason}")
+        return attachment
+    except Exception as exc:
+        return _truncate(f"Error: {exc}")
+
+
 def run_write(path: str | Path, content: str, workdir: str | Path | None = None) -> str:
     try:
         if not isinstance(path, (str, Path)) or not isinstance(content, str):
@@ -185,6 +203,10 @@ _TOOL_SPECS: dict[str, dict[str, Any]] = {
         "function": {"name": "glob", "description": "Find files matching a glob pattern.", "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"], "additionalProperties": False}},
         "handler": run_glob,
     },
+    "read_image": {
+        "function": {"name": "read_image", "description": "Load a local JPEG, PNG, WebP, or GIF so the model can inspect its visible content.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"], "additionalProperties": False}},
+        "handler": run_read_image,
+    },
 }
 
 TOOLS: list[dict[str, Any]] = [
@@ -199,7 +221,7 @@ def dispatch_tool(
     workdir: str | Path | None = None,
     *,
     bash_timeout_s: float | None = None,
-) -> str:
+) -> str | ImageAttachment:
     """Dispatch one decoded call and turn every handler failure into text."""
 
     spec = _TOOL_SPECS.get(name) if isinstance(name, str) else None
@@ -223,6 +245,9 @@ def dispatch_tool(
         values["workdir"] = workdir
         if name == "bash" and bash_timeout_s is not None:
             values["timeout_s"] = bash_timeout_s
-        return _truncate(str(spec["handler"](**values)))
+        result = spec["handler"](**values)
+        if isinstance(result, ImageAttachment):
+            return result
+        return _truncate(str(result))
     except Exception as exc:
         return _truncate(f"Error: Invalid arguments for {name}: {exc}")

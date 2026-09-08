@@ -16,7 +16,7 @@ messages[] → OpenAI SDK → assistant message
                          └─ 无 tool call：提取文本，结束循环
 ```
 
-v0.1.0 注册五个通用工作区工具；模型可以在预算范围内多次调用并观察回填结果。遥感语义工具仍通过后续 MCP 接入，消息列表和内容块结构保持稳定。
+v0.1.0 注册六个通用工作区工具；模型可以在预算范围内多次调用并观察回填结果。遥感语义工具仍通过后续 MCP 接入，消息列表和内容块结构保持稳定。
 
 本版本的关键约束：
 
@@ -52,7 +52,7 @@ v0.1.0 注册五个通用工作区工具；模型可以在预算范围内多次�
 - 解码遥感栅格（GeoTIFF 等）的像素或地理信息；web 格式图片（JPEG/PNG/WebP/GIF ≤ 20MB）以 OpenAI `image_url` 视觉输入直传模型，影像字节永不写入轨迹。
 - 仅有影像时自动执行全部遥感能力的探索模式。
 
-参考仓库 s02 用 `bash`、文件读写和 `glob` 工具演示工具回填；RS-Harness v0.1.0 提供 `bash`、`read_file`、`write_file`、`edit_file`、`glob`，遥感能力仍保持 MCP 边界。后续 MCP 工具接入时，沿用同一个消息回填循环，不把工具流程硬编码成新的 Agent 类型。
+参考仓库 s02 用 `bash`、文件读写和 `glob` 工具演示工具回填；RS-Harness v0.1.0 提供 `bash`、`read_file`、`write_file`、`edit_file`、`glob`、`read_image`，遥感能力仍保持 MCP 边界。后续 MCP 工具接入时，沿用同一个消息回填循环，不把工具流程硬编码成新的 Agent 类型。
 
 ## 3. 输入与输出契约
 
@@ -137,7 +137,7 @@ OPENAI_API_KEY=your-openai-key
 打开已有 Session，读取 messages.jsonl 中的完整上下文
         │
         ▼
-调用 OpenAI Chat Completions 接口（提供五个工作区工具）
+调用 OpenAI Chat Completions 接口（提供六个工作区工具）
         │
         ▼
 按 provider 原始结构追加 assistant/tool message 到 messages.jsonl
@@ -200,10 +200,12 @@ system prompt 至少要求模型：
 
 - 直接回答 query，使用用户问题的语言；
 - 只依据消息中可见的事实，不编造影像、测量或算法结果；
-- 只使用系统声明的五个工作区工具；工具结果必须来自实际执行，不得伪造；
+- 只使用系统声明的六个工作区工具；工具结果必须来自实际执行，不得伪造；
 - 不输出隐藏的逐步思考，只返回面向用户的内容。
 
 带 `image` 的 query：可直读图片（本地 web 格式文件或 http(s) URL）以 `image_url` 块附给模型，模型只描述实际看到的内容；不可直读引用（遥感栅格、超限、缺失、远端对象）在 user 消息中附加限制说明——该引用不可见，不得猜测内容，遥感分析需要 MCP 工具。
+
+用户要求查看本地图片但没有提供路径时，模型可先用 `glob` 查找工作区文件，再调用 `read_image`。工具结果先以文本 tool message 记录，再追加带 `image_ref` 的 user 消息；下一轮请求将其重建为 `image_url`，ledger 不保存图片字节。
 
 ## 6. OpenAI SDK 与核心模块
 

@@ -1,3 +1,4 @@
+import base64
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -5,6 +6,8 @@ import rs_harness.agent_loop as agent_loop_module
 from rs_harness.agent_loop import InputRequest, create_session, run
 from rs_harness.config import Config
 from rs_harness.runtime.session import Session
+
+JPEG = b"\xff\xd8\xff\xe0" + b"jpeg-payload"
 
 
 class SequenceClient:
@@ -243,6 +246,107 @@ def test_glob_tool_is_available_to_the_model_loop(tmp_path: Path):
         "tool_call_id": "glob-1",
         "content": "one.txt",
     } in Session.open(config, session.state.session_id).messages()
+
+
+def test_read_image_tool_attaches_image_after_tool_results(tmp_path: Path):
+    config = _config(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    image = workspace / "photo.jpg"
+    image.write_bytes(JPEG)
+    client = SequenceClient(
+        [
+            _response(
+                calls=[
+                    _call("image-1", "read_image", '{"path":"photo.jpg"}'),
+                    _call("glob-1", "glob", '{"pattern":"*.jpg"}'),
+                ]
+            ),
+            _response("I can see it"),
+        ]
+    )
+    session = create_session(config, workdir=workspace)
+    events: list[tuple[str, str]] = []
+
+    result = run(
+        session.state.session_id,
+        {"query": "看看这个 jpg 图片有什么内容"},
+        config,
+        openai_sdk_client=client,
+        tool_log=lambda name, preview: events.append((name, preview)),
+    )
+
+    assert result.status == "succeeded"
+    messages = client.calls[1]["messages"]
+    assert [message["role"] for message in messages[-4:]] == [
+        "assistant",
+        "tool",
+        "tool",
+        "user",
+    ]
+    assert messages[-2] == {
+        "role": "tool",
+        "tool_call_id": "glob-1",
+        "content": "photo.jpg",
+    }
+    image_content = messages[-1]["content"]
+    assert image_content[0]["type"] == "text"
+    assert image_content[1] == {
+        "type": "image_url",
+        "image_url": {
+            "url": "data:image/jpeg;base64," + base64.b64encode(JPEG).decode("ascii")
+        },
+    }
+    assert events[0][0] == "read_image"
+    assert events[0][1].startswith("Image loaded:")
+
+    ledger = (session.path / "messages.jsonl").read_text(encoding="utf-8")
+    assert "image_ref" in ledger
+    assert "data:image/jpeg" not in ledger
+    assert "jpeg-payload" not in ledger
+
+
+def test_read_image_tool_history_reembeds_and_degrades_when_file_removed(tmp_path: Path):
+    config = _config(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    image = workspace / "photo.jpg"
+    image.write_bytes(JPEG)
+    client = SequenceClient(
+        [
+            _response(calls=[_call("image-1", "read_image", '{"path":"photo.jpg"}')]),
+            _response("first"),
+            _response("second"),
+            _response("third"),
+        ]
+    )
+    session = create_session(config, workdir=workspace)
+    session_id = session.state.session_id
+
+    run(session_id, {"query": "查看图片"}, config, openai_sdk_client=client)
+    run(session_id, {"query": "补充说明"}, config, openai_sdk_client=client)
+
+    history_images = [
+        part
+        for message in client.calls[2]["messages"]
+        if message.get("role") == "user" and isinstance(message.get("content"), list)
+        for part in message["content"]
+    ]
+    assert any(part.get("type") == "image_url" for part in history_images)
+
+    image.unlink()
+    run(session_id, {"query": "再次说明"}, config, openai_sdk_client=client)
+
+    degraded = [
+        part
+        for message in client.calls[3]["messages"]
+        if message.get("role") == "user" and isinstance(message.get("content"), list)
+        for part in message["content"]
+    ]
+    assert {
+        "type": "text",
+        "text": f"Image previously attached at {image.resolve()} is no longer available.",
+    } in degraded
 
 
 def test_budget_executes_last_tool_batch_before_returning(tmp_path: Path):

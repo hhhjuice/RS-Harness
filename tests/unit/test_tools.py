@@ -8,14 +8,18 @@ from rs_harness.runtime.tools import (
     run_edit,
     run_glob,
     run_read,
+    run_read_image,
     run_write,
     safe_path,
 )
+from rs_harness.runtime.images import ImageAttachment
+
+JPEG = b"\xff\xd8\xff\xe0" + b"jpeg-payload"
 
 
 def test_tool_definitions_expose_all_workspace_tools():
     names = [item["function"]["name"] for item in TOOLS]
-    assert names == ["bash", "read_file", "write_file", "edit_file", "glob"]
+    assert names == ["bash", "read_file", "write_file", "edit_file", "glob", "read_image"]
     assert all(item["type"] == "function" for item in TOOLS)
 
 
@@ -46,6 +50,23 @@ def test_file_tool_errors_are_strings_and_symlink_escape_is_rejected(tmp_path: P
     assert "missing" in dispatch_tool("write_file", {"path": "x"}, tmp_path)
     assert "unexpected" in dispatch_tool("bash", {"command": "true", "extra": 1}, tmp_path)
     outside.unlink()
+
+
+def test_read_image_loads_supported_image_and_enforces_workspace(tmp_path: Path):
+    image = tmp_path / "photo.jpg"
+    image.write_bytes(JPEG)
+
+    result = run_read_image("photo.jpg", workdir=tmp_path)
+
+    assert isinstance(result, ImageAttachment)
+    assert result.path == str(image.resolve())
+    assert result.mime == "image/jpeg"
+    assert run_read_image("missing.jpg", workdir=tmp_path).startswith("Error:")
+    assert "Path escapes workspace" in run_read_image("../photo.jpg", workdir=tmp_path)
+
+    raster = tmp_path / "scene.tif"
+    raster.write_bytes(b"II*\x00opaque")
+    assert "unsupported format" in run_read_image("scene.tif", workdir=tmp_path)
 
 
 def test_bash_runs_in_workspace_and_truncates_output(tmp_path: Path):
