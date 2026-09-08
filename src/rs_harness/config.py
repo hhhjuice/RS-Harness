@@ -127,12 +127,6 @@ class Config(BaseModel):
         _load_dotenv(config.runtime.dotenv_file)
         return config
 
-    @classmethod
-    def from_file(cls, path: str | Path = "config/default.toml") -> Self:
-        """Compatibility alias for embedding code that prefers ``from_file``."""
-
-        return cls.load(path)
-
     def api_key(self) -> str:
         """Return the configured API key without ever logging it."""
 
@@ -183,9 +177,3 @@ def _load_dotenv(path: Path) -> None:
     # A missing .env is valid when deployment injects the same variable into the
     # process. api_key() performs the definitive presence check.
     load_dotenv(dotenv_path=path, override=False)
-
-
-def load_config(path: str | Path = "config/default.toml") -> Config:
-    """Functional alias for callers that prefer a loader function."""
-
-    return Config.load(path)

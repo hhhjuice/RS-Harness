@@ -5,9 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
+
+# ``data:<mime>/<subtype>`` prefix; matches real inline-URI values, not prose
+# that happens to start with "data:".
+_DATA_URI = re.compile(r"data:[\w.+-]+/[\w.+-]+", re.IGNORECASE)
 
 
 def utc_now() -> str:
@@ -56,10 +61,6 @@ class MessageLedger:
         return [record["message"] for record in self.records()]
 
 
-# Import-compatible alias; the persisted format is now a message ledger.
-TraceWriter = MessageLedger
-
-
 def _json_safe(value: Any) -> Any:
     """Convert SDK/Pydantic values while redacting credential fields."""
 
@@ -97,7 +98,11 @@ def _json_safe(value: Any) -> Any:
             pass
     if isinstance(value, Path):
         return str(value)
-    if isinstance(value, str) and value.lower().startswith("data:"):
+    if hasattr(value, "__dict__"):
+        return {str(key): _json_safe(item) for key, item in vars(value).items()}
+    # Summarize only URI-shaped values (``data:<mime>,...``); short text that
+    # merely starts with "data:" must survive verbatim in the ledger.
+    if isinstance(value, str) and _DATA_URI.match(value):
         digest = hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()[:16]
         return f"[data value omitted; length={len(value)} sha256={digest}]"
     if isinstance(value, (str, int, float, bool)) or value is None:

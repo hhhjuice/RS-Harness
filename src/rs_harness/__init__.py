@@ -3,7 +3,7 @@
 __version__ = "0.1.0"
 
 from .agent_loop import AgentLoop, InputRequest, close_session, create_session, run
-from .config import Config, ConfigError, LoopConfig, ModelConfig, RuntimeConfig, load_config
+from .config import Config, ConfigError, LoopConfig, ModelConfig, RuntimeConfig
 from .runtime.session import ErrorInfo, InteractionResult, SessionResult, SessionState, SessionStatus
 from .runtime.tools import (
     TOOLS,
@@ -34,7 +34,6 @@ __all__ = [
     "run",
     "create_session",
     "close_session",
-    "load_config",
     "TOOLS",
     "TOOL_HANDLERS",
     "dispatch_tool",

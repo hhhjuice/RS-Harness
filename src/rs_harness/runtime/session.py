@@ -101,7 +101,7 @@ class Session:
             ),
             path,
         )
-        session._append_message_unlocked({"role": "system", "content": system_prompt})
+        session.append({"role": "system", "content": system_prompt})
         session.save_state()
         return session
 
@@ -165,9 +165,10 @@ class Session:
 
     def append_message(self, message: dict[str, Any]) -> int:
         with self.locked():
-            return self._append_message_unlocked(message)
+            return self.append(message)
 
-    def _append_message_unlocked(self, message: dict[str, Any]) -> int:
+    def append(self, message: dict[str, Any]) -> int:
+        """Append one message; the caller must already hold the session lock."""
         if self.state.status != "running":
             raise ValueError("session_closed")
         seq = self.ledger.append(message)
@@ -246,8 +247,6 @@ class Session:
                 stop_reason=stop_reason,
             )
             return result
-
-    finish = close
 
 
 def _session_id() -> str:

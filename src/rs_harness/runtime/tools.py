@@ -29,14 +29,6 @@ _MAX_OUTPUT = 50000
 def _truncate(value: str) -> str:
     return value[:_MAX_OUTPUT]
 
-TOOLS: list[dict[str, Any]] = [
-    {"type": "function", "function": {"name": "bash", "description": "Run a shell command.", "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"], "additionalProperties": False}}},
-    {"type": "function", "function": {"name": "read_file", "description": "Read file contents.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer", "minimum": 1}}, "required": ["path"], "additionalProperties": False}}},
-    {"type": "function", "function": {"name": "write_file", "description": "Write content to a file.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"], "additionalProperties": False}}},
-    {"type": "function", "function": {"name": "edit_file", "description": "Replace exact text in a file once.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"], "additionalProperties": False}}},
-    {"type": "function", "function": {"name": "glob", "description": "Find files matching a glob pattern.", "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"], "additionalProperties": False}}},
-]
-
 
 def normalize_workdir(workdir: str | Path | None = None) -> str:
     """Resolve and validate a tool workspace, returning an absolute path."""
@@ -171,28 +163,34 @@ def run_glob(pattern: str, workdir: str | Path | None = None) -> str:
         return _truncate(f"Error: {exc}")
 
 
-TOOL_HANDLERS = {
-    "bash": run_bash,
-    "read_file": run_read,
-    "write_file": run_write,
-    "edit_file": run_edit,
-    "glob": run_glob,
+# Single source of truth: each tool's schema and handler in one place.
+_TOOL_SPECS: dict[str, dict[str, Any]] = {
+    "bash": {
+        "function": {"name": "bash", "description": "Run a shell command.", "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"], "additionalProperties": False}},
+        "handler": run_bash,
+    },
+    "read_file": {
+        "function": {"name": "read_file", "description": "Read file contents.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer", "minimum": 1}}, "required": ["path"], "additionalProperties": False}},
+        "handler": run_read,
+    },
+    "write_file": {
+        "function": {"name": "write_file", "description": "Write content to a file.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"], "additionalProperties": False}},
+        "handler": run_write,
+    },
+    "edit_file": {
+        "function": {"name": "edit_file", "description": "Replace exact text in a file once.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"], "additionalProperties": False}},
+        "handler": run_edit,
+    },
+    "glob": {
+        "function": {"name": "glob", "description": "Find files matching a glob pattern.", "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"], "additionalProperties": False}},
+        "handler": run_glob,
+    },
 }
 
-_TOOL_ARGUMENTS = {
-    "bash": {"command"},
-    "read_file": {"path", "limit"},
-    "write_file": {"path", "content"},
-    "edit_file": {"path", "old_text", "new_text"},
-    "glob": {"pattern"},
-}
-_REQUIRED_ARGUMENTS = {
-    "bash": {"command"},
-    "read_file": {"path"},
-    "write_file": {"path", "content"},
-    "edit_file": {"path", "old_text", "new_text"},
-    "glob": {"pattern"},
-}
+TOOLS: list[dict[str, Any]] = [
+    {"type": "function", "function": spec["function"]} for spec in _TOOL_SPECS.values()
+]
+TOOL_HANDLERS = {name: spec["handler"] for name, spec in _TOOL_SPECS.items()}
 
 
 def dispatch_tool(
@@ -204,19 +202,20 @@ def dispatch_tool(
 ) -> str:
     """Dispatch one decoded call and turn every handler failure into text."""
 
-    handler = TOOL_HANDLERS.get(name) if isinstance(name, str) else None
-    if handler is None:
+    spec = _TOOL_SPECS.get(name) if isinstance(name, str) else None
+    if spec is None:
         return _truncate(f"Unknown tool: {name}")
     if not isinstance(arguments, Mapping):
         return _truncate(f"Error: Invalid arguments for {name}: expected an object")
+    parameters = spec["function"]["parameters"]
     try:
         values = dict(arguments)
-        missing = _REQUIRED_ARGUMENTS[name] - values.keys()
+        missing = set(parameters["required"]) - values.keys()
         if missing:
             return _truncate(
                 f"Error: Invalid arguments for {name}: missing {', '.join(sorted(missing))}"
             )
-        extra = values.keys() - _TOOL_ARGUMENTS[name]
+        extra = values.keys() - parameters["properties"].keys()
         if extra:
             return _truncate(
                 f"Error: Invalid arguments for {name}: unexpected {', '.join(sorted(extra))}"
@@ -224,6 +223,6 @@ def dispatch_tool(
         values["workdir"] = workdir
         if name == "bash" and bash_timeout_s is not None:
             values["timeout_s"] = bash_timeout_s
-        return _truncate(str(handler(**values)))
+        return _truncate(str(spec["handler"](**values)))
     except Exception as exc:
         return _truncate(f"Error: Invalid arguments for {name}: {exc}")

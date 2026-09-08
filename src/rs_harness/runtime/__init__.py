@@ -1,7 +1,7 @@
 """Runtime state and persistent message contexts."""
 
 from .session import ErrorInfo, InteractionResult, Session, SessionResult, SessionState
-from .trace import MessageLedger, TraceWriter
+from .trace import MessageLedger
 from .tools import (
     TOOLS,
     TOOL_HANDLERS,
@@ -22,7 +22,6 @@ __all__ = [
     "Session",
     "SessionResult",
     "SessionState",
-    "TraceWriter",
     "TOOLS",
     "TOOL_HANDLERS",
     "dispatch_tool",
