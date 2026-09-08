@@ -6,7 +6,8 @@ timeout_s = 60
 max_tokens = 4096
 
 [loop]
-max_turns = 1
+max_turns = 20
+bash_timeout_s = 120
 
 [runtime]
 sessions_dir = "../sessions"

@@ -7,11 +7,12 @@ from rs_harness.config import Config
 from rs_harness.runtime import Session
 
 
-def make_config(tmp_path: Path) -> Config:
+def make_config(tmp_path: Path, *, max_turns: int = 20) -> Config:
     prompt = tmp_path / "system.md"
     prompt.write_text("system", encoding="utf-8")
     return Config(
         model={"model": "test-model", "api_key_env": "UNUSED_RS_KEY"},
+        loop={"max_turns": max_turns},
         runtime={"sessions_dir": tmp_path / "sessions", "system_prompt_file": prompt, "dotenv_file": tmp_path / "missing.env"},
     )
 
@@ -61,13 +62,20 @@ def test_openai_answer_is_recorded_and_context_reused(tmp_path):
     assert Session.open(config, session.state.session_id).state.query == "question"
 
 
-def test_openai_tool_request_is_explicitly_unsupported(tmp_path):
-    config = make_config(tmp_path)
+def test_openai_tool_request_is_executed_and_budgeted(tmp_path):
+    config = make_config(tmp_path, max_turns=1)
     session = create_session(config)
     fake = FakeOpenAI(None, [SimpleNamespace(id="call_1", type="function", function=SimpleNamespace(name="x", arguments="{}"))])
     result = run(session.state.session_id, InputRequest(query="question"), config, openai_sdk_client=fake)
     assert result.status == "failed"
-    assert result.errors[0].code == "unsupported_action"
+    assert result.errors[0].code == "budget_exceeded"
+    assert fake.calls[0]["tools"]
+    messages = session.messages()
+    assert messages[-1] == {
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "content": "Unknown tool: x",
+    }
 
 
 def test_inline_image_data_is_not_forwarded_or_persisted(tmp_path):

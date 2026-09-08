@@ -92,3 +92,65 @@ def test_close_derives_text_blocks_and_explicit_answer_wins(tmp_path):
     explicit = Session.create(make_config(tmp_path))
     explicit.append_message({"role": "assistant", "content": "ledger answer"})
     assert explicit.close(answer="explicit answer").answer == "explicit answer"
+
+
+def test_close_does_not_derive_text_from_assistant_tool_planning(tmp_path):
+    session = Session.create(make_config(tmp_path))
+    session.append_message(
+        {
+            "role": "assistant",
+            "content": "planning text",
+            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}],
+        }
+    )
+    assert session.close().answer is None
+
+
+def test_close_does_not_fall_back_to_older_answer_after_tool_planning(tmp_path):
+    session = Session.create(make_config(tmp_path))
+    session.append_message({"role": "assistant", "content": "old answer"})
+    session.append_message(
+        {
+            "role": "assistant",
+            "content": "planning text",
+            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}],
+        }
+    )
+    assert session.close().answer is None
+
+
+def test_old_session_without_workdir_remains_loadable(tmp_path):
+    config = make_config(tmp_path)
+    session = Session.create(config)
+    state_path = session.path / "session.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state.pop("workdir", None)
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    reopened = Session.open(config, session.state.session_id)
+    assert reopened.state.workdir is None
+
+
+def test_list_returns_all_session_states_and_skips_strays(tmp_path):
+    config = make_config(tmp_path)
+    first = Session.create(config)
+    second = Session.create(config)
+    second.append_message({"role": "user", "content": "hi"})
+    second.close()
+    (config.runtime.sessions_dir / "stray.txt").write_text("not a session", encoding="utf-8")
+    broken = config.runtime.sessions_dir / "broken"
+    broken.mkdir()
+    (broken / "session.json").write_text("{not json", encoding="utf-8")
+
+    states = Session.list(config)
+
+    assert [state.session_id for state in states] == sorted(
+        [first.state.session_id, second.state.session_id]
+    )
+    by_id = {state.session_id: state for state in states}
+    assert by_id[first.state.session_id].status == "running"
+    assert by_id[second.state.session_id].status == "closed"
+    assert by_id[second.state.session_id].message_count == 2
+
+
+def test_list_with_missing_sessions_dir_returns_empty(tmp_path):
+    assert Session.list(make_config(tmp_path)) == []

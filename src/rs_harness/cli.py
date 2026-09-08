@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Annotated
 
+
 try:  # Typer is the documented CLI stack; keep imports usable with old Click.
     import typer
 except Exception:  # pragma: no cover - only exercised by an incompatible env
@@ -15,10 +16,34 @@ except Exception:  # pragma: no cover - only exercised by an incompatible env
 
 from .agent_loop import InputRequest, close_session, create_session, run
 from .config import Config, ConfigError
-from .runtime.session import Session
+from .runtime.session import Session, SessionState
 
 
-def _ask_impl(query: str | None, image: str | None, session_id: str | None, config: Path, as_json: bool) -> int:
+def _configure_readline() -> None:
+    """Apply the terminal bindings used by the interactive reference client."""
+
+    try:
+        import readline
+
+        readline.parse_and_bind("set bind-tty-special-chars off")
+        readline.parse_and_bind("set input-meta on")
+        readline.parse_and_bind("set output-meta on")
+        readline.parse_and_bind("set convert-meta off")
+    except ImportError:
+        pass
+
+
+_configure_readline()
+
+
+def _ask_impl(
+    query: str | None,
+    image: str | None,
+    session_id: str | None,
+    config: Path,
+    as_json: bool,
+    workdir: Path | str | None = None,
+) -> int:
     request = InputRequest(query=query, image=image)
     # Empty input is intentionally silent and must not load Config or a model.
     if not request.has_input():
@@ -32,11 +57,15 @@ def _ask_impl(query: str | None, image: str | None, session_id: str | None, conf
 
     if session_id is None:
         try:
-            session_id = create_session(loaded_config, query=query, image=image).state.session_id
+            create_kwargs = {} if workdir is None else {"workdir": workdir}
+            session_id = create_session(
+                loaded_config, query=query, image=image, **create_kwargs
+            ).state.session_id
         except Exception as exc:
             _print_error("runtime_error", f"Unable to create session: {exc}", as_json=as_json)
             return 1
-    result = run(session_id, request, loaded_config)
+    run_kwargs = {} if workdir is None else {"workdir": workdir}
+    result = run(session_id, request, loaded_config, tool_log=_cli_tool_log, **run_kwargs)
     if as_json:
         _echo(result.model_dump_json(indent=2))
         return {"succeeded": 0, "not_supported": 2, "failed": 1}[result.status]
@@ -61,32 +90,55 @@ if typer is not None:
         ctx: typer.Context,
         config: Annotated[Path, typer.Option("--config", exists=False)] = Path("config/default.toml"),
         session_id: Annotated[str | None, typer.Option("--session-id")] = None,
+        workdir: Annotated[Path | None, typer.Option("--workdir")] = None,
     ) -> None:
         """RS-Harness command group."""
+        ctx.ensure_object(dict)
+        ctx.obj["workdir"] = workdir
         if ctx.invoked_subcommand is None:
-            raise typer.Exit(_interactive_impl(config, session_id))
+            raise typer.Exit(_interactive_impl(config, session_id, workdir))
 
     @app.command()
     def ask(
+        ctx: typer.Context,
         query: Annotated[str | None, typer.Argument(help="Natural-language query.")] = None,
         image: Annotated[
             str | None, typer.Option("--image", help="Opaque image path, URI or object ID.")
         ] = None,
         session_id: Annotated[str | None, typer.Option("--session-id", help="Persistent session id; omitted to create one.")] = None,
+        workdir: Annotated[Path | None, typer.Option("--workdir", help="Workspace directory for tools.")] = None,
         config: Annotated[Path, typer.Option("--config", exists=False, help="TOML Config path.")] = Path(
             "config/default.toml"
         ),
         as_json: Annotated[
-            bool, typer.Option("--json", help="Print the complete SessionResult as JSON.")
+            bool,
+            typer.Option(
+                "--json",
+                help="Print the SessionResult as JSON; tool logs may precede it.",
+            ),
         ] = False,
     ) -> None:
-        raise typer.Exit(_ask_impl(query, image, session_id, config, as_json))
+        root_workdir = (ctx.obj or {}).get("workdir")
+        effective_workdir = workdir if workdir is not None else root_workdir
+        raise typer.Exit(_ask_impl(query, image, session_id, config, as_json, effective_workdir))
 
     @app.command("create-session")
     def create_session_command(
+        ctx: typer.Context,
         config: Annotated[Path, typer.Option("--config", exists=False)] = Path("config/default.toml"),
+        workdir: Annotated[Path | None, typer.Option("--workdir", help="Workspace directory for tools.")] = None,
     ) -> None:
-        session = create_session(Config.load(config))
+        root_workdir = (ctx.obj or {}).get("workdir")
+        effective_workdir = workdir if workdir is not None else root_workdir
+        kwargs = {} if effective_workdir is None else {"workdir": effective_workdir}
+        try:
+            session = create_session(Config.load(config), **kwargs)
+        except ConfigError as exc:
+            _print_error(exc.code, exc.message, as_json=False)
+            raise typer.Exit(1) from exc
+        except Exception as exc:
+            _print_error("runtime_error", str(exc), as_json=False)
+            raise typer.Exit(1) from exc
         _echo(json.dumps({"session_id": session.state.session_id, "session_path": str(session.path)}, ensure_ascii=False))
 
     @app.command("close-session")
@@ -95,6 +147,13 @@ if typer is not None:
         config: Annotated[Path, typer.Option("--config", exists=False)] = Path("config/default.toml"),
     ) -> None:
         _echo(close_session(Config.load(config), session_id).model_dump_json(indent=2))
+
+    @app.command("list-session")
+    def list_session_command(
+        config: Annotated[Path, typer.Option("--config", exists=False)] = Path("config/default.toml"),
+    ) -> None:
+        """Print every session state under the configured sessions directory."""
+        raise typer.Exit(_list_sessions_impl(config))
 else:
     # This fallback only handles environments where Typer cannot import because
     # of an unrelated Click version mismatch. The project still declares Typer
@@ -107,8 +166,9 @@ else:
         session_id: str | None = None,
         config: Path = Path("config/default.toml"),
         as_json: bool = False,
+        workdir: Path | str | None = None,
     ) -> int:
-        return _ask_impl(query, image, session_id, config, as_json)
+        return _ask_impl(query, image, session_id, config, as_json, workdir)
 
 
 def _print_error(code: str, message: str, *, as_json: bool) -> None:
@@ -123,14 +183,67 @@ def _print_error(code: str, message: str, *, as_json: bool) -> None:
         _echo(f"{code}: {message}", err=True)
 
 
+def _session_summary(state: SessionState) -> dict[str, object]:
+    # Keep the listing scannable: full answers and error details stay in
+    # session.json and /status.
+    return {
+        "session_id": state.session_id,
+        "status": state.status,
+        "mode": state.mode,
+        "query": state.query,
+        "workdir": state.workdir,
+        "turn": state.turn,
+        "message_count": state.message_count,
+        "error_count": len(state.errors),
+        "started_at": state.started_at,
+        "finished_at": state.finished_at,
+    }
+
+
+def _list_sessions_impl(config_path: Path) -> int:
+    try:
+        config = Config.load(config_path)
+        sessions = Session.list(config)
+    except ConfigError as exc:
+        _print_error(exc.code, exc.message, as_json=False)
+        return 1
+    except Exception as exc:
+        _print_error("runtime_error", str(exc), as_json=False)
+        return 1
+    _echo(
+        json.dumps(
+            [_session_summary(state) for state in sessions], ensure_ascii=False, indent=2
+        )
+    )
+    return 0
+
+
 def _echo(message: str, *, err: bool = False) -> None:
     print(message, file=sys.stderr if err else sys.stdout)
 
 
-def _interactive_impl(config_path: Path, session_id: str | None) -> int:
+def _cli_tool_log(name: str, preview: str) -> None:
+    # Tool logs share stdout with the answer/JSON payload; keep escape codes
+    # out of pipes and redirected output.
+    if sys.stdout.isatty():
+        print(f"\033[33m> {name}\033[0m")
+    else:
+        print(f"> {name}")
+    print(preview)
+
+
+def _interactive_impl(
+    config_path: Path,
+    session_id: str | None,
+    workdir: Path | str | None = None,
+) -> int:
     try:
         config = Config.load(config_path)
-        session = Session.open(config, session_id) if session_id else create_session(config)
+        if session_id:
+            session = Session.open(config, session_id)
+        else:
+            kwargs = {} if workdir is None else {"workdir": workdir}
+            session = create_session(config, **kwargs)
     except Exception as exc:
         _print_error("runtime_error", str(exc), as_json=False)
         return 1
@@ -140,7 +253,7 @@ def _interactive_impl(config_path: Path, session_id: str | None) -> int:
     _echo("Type /help for commands.\n")
     while True:
         try:
-            text = input("rsh> ")
+            text = input("\033[34mrsh>\033[0m ")
         except (EOFError, KeyboardInterrupt):
             _echo(f"\nSession remains running: {session_id}")
             _echo(f"Resume with: uv run rsh --session-id {session_id}")
@@ -149,13 +262,19 @@ def _interactive_impl(config_path: Path, session_id: str | None) -> int:
         if not text:
             continue
         if text == "/help":
-            _echo("/help  show commands\n/status  show session status\n/close  close session\n/quit  leave session running")
+            _echo(
+                "/help  show commands\n"
+                "/status  show session status\n"
+                "/close  close session\n"
+                "/quit  leave session running\n"
+                "/exit  leave session running"
+            )
             continue
         if text == "/status":
             session = Session.open(config, session_id)
             _echo(json.dumps(session.state.model_dump(mode="json"), ensure_ascii=False, indent=2))
             continue
-        if text == "/quit":
+        if text in ("/quit", "/exit"):
             _echo(f"Session remains running: {session_id}")
             _echo(f"Resume with: uv run rsh --session-id {session_id}")
             return 0
@@ -166,7 +285,8 @@ def _interactive_impl(config_path: Path, session_id: str | None) -> int:
             _echo(f"Unknown command: {text}", err=True)
             continue
 
-        result = run(session_id, InputRequest(query=text), config)
+        kwargs = {} if workdir is None else {"workdir": workdir}
+        result = run(session_id, InputRequest(query=text), config, tool_log=_cli_tool_log, **kwargs)
         if result.status == "succeeded":
             _echo(result.answer or "")
         elif result.status == "not_supported":
@@ -183,29 +303,46 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="rsh")
     parser.add_argument("--config", dest="root_config", type=Path, default=Path("config/default.toml"))
     parser.add_argument("--session-id", dest="root_session_id")
+    parser.add_argument("--workdir", dest="root_workdir", type=Path)
     subparsers = parser.add_subparsers(dest="command", required=False)
     create_parser = subparsers.add_parser("create-session")
     create_parser.add_argument("--config", type=Path, default=Path("config/default.toml"))
+    create_parser.add_argument("--workdir", type=Path)
     close_parser = subparsers.add_parser("close-session")
     close_parser.add_argument("--session-id", required=True)
     close_parser.add_argument("--config", type=Path, default=Path("config/default.toml"))
+    list_parser = subparsers.add_parser("list-session", help="List every recorded session")
+    list_parser.add_argument("--config", type=Path, default=Path("config/default.toml"))
     ask_parser = subparsers.add_parser("ask", help="Ask the configured model a question")
     ask_parser.add_argument("query", nargs="?")
     ask_parser.add_argument("--image")
     ask_parser.add_argument("--session-id")
+    ask_parser.add_argument("--workdir", type=Path)
     ask_parser.add_argument("--config", type=Path, default=Path("config/default.toml"))
     ask_parser.add_argument("--json", action="store_true", dest="as_json")
     args = parser.parse_args()
     if args.command == "create-session":
-        session = create_session(Config.load(args.config))
+        effective_workdir = args.workdir if args.workdir is not None else args.root_workdir
+        kwargs = {} if effective_workdir is None else {"workdir": effective_workdir}
+        try:
+            session = create_session(Config.load(args.config), **kwargs)
+        except ConfigError as exc:
+            _print_error(exc.code, exc.message, as_json=False)
+            raise SystemExit(1) from exc
+        except Exception as exc:
+            _print_error("runtime_error", str(exc), as_json=False)
+            raise SystemExit(1) from exc
         _echo(json.dumps({"session_id": session.state.session_id, "session_path": str(session.path)}, ensure_ascii=False))
         return
     if args.command == "close-session":
         _echo(close_session(Config.load(args.config), args.session_id).model_dump_json(indent=2))
         return
+    if args.command == "list-session":
+        raise SystemExit(_list_sessions_impl(args.config))
     if args.command is None:
-        raise SystemExit(_interactive_impl(args.root_config, args.root_session_id))
-    raise SystemExit(_ask_impl(args.query, args.image, args.session_id, args.config, args.as_json))
+        raise SystemExit(_interactive_impl(args.root_config, args.root_session_id, args.root_workdir))
+    effective_workdir = args.workdir if args.workdir is not None else args.root_workdir
+    raise SystemExit(_ask_impl(args.query, args.image, args.session_id, args.config, args.as_json, effective_workdir))
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -1,12 +1,13 @@
 [model]
-model = "gpt-5.6-luna"
-base_url = "https://juiceai.cloud/v1"                          # empty uses the SDK default endpoint
+model = "moonshotai/Kimi-K2.7-Code"
+base_url = "https://api.siliconflow.cn/v1"                          # empty uses the SDK default endpoint
 api_key_env = "OPENAI_API_KEY"
 timeout_s = 60
 max_tokens = 4096
 
 [loop]
-max_turns = 1
+max_turns = 20
+bash_timeout_s = 120
 
 [runtime]
 sessions_dir = "../sessions"

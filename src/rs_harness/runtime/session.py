@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..config import Config
 from .trace import MessageLedger, _json_safe, utc_now
+from .tools import normalize_workdir
 
 SessionStatus = Literal["running", "closed", "failed"]
 InteractionStatus = Literal["succeeded", "not_supported", "failed"]
@@ -34,6 +35,7 @@ class SessionState(BaseModel):
     mode: Literal["instruction", "exploration"] = "instruction"
     query: str | None = None
     image: str | None = None
+    workdir: str | None = None
     turn: int = 0
     message_count: int = 0
     errors: list[ErrorInfo] = Field(default_factory=list)
@@ -81,8 +83,10 @@ class Session:
         *,
         query: str | None = None,
         image: str | None = None,
+        workdir: str | Path | None = None,
     ) -> "Session":
         system_prompt = config.system_prompt()
+        resolved_workdir = normalize_workdir(workdir)
         session_id = _session_id()
         path = config.runtime.sessions_dir / session_id
         path.mkdir(parents=True, exist_ok=False)
@@ -92,6 +96,7 @@ class Session:
                 mode="exploration" if query is None and image is not None else "instruction",
                 query=query,
                 image=image,
+                workdir=resolved_workdir,
                 started_at=utc_now(),
             ),
             path,
@@ -110,6 +115,30 @@ class Session:
             raise FileNotFoundError(f"Session not found: {session_id}")
         state = SessionState.model_validate_json(state_path.read_text(encoding="utf-8"))
         return cls(state, path)
+
+    @classmethod
+    def list(cls, config: Config) -> list[SessionState]:
+        """Load every persisted session state, oldest first.
+
+        Entries without a readable ``session.json`` (stray files, partially
+        written directories) are skipped; ``open`` remains the strict path.
+        """
+
+        sessions_dir = config.runtime.sessions_dir
+        if not sessions_dir.is_dir():
+            return []
+        states: list[SessionState] = []
+        for path in sorted(sessions_dir.iterdir()):
+            state_path = path / "session.json"
+            if not state_path.is_file():
+                continue
+            try:
+                states.append(
+                    SessionState.model_validate_json(state_path.read_text(encoding="utf-8"))
+                )
+            except Exception:
+                continue
+        return states
 
     @contextmanager
     def locked(self) -> Iterator["Session"]:
@@ -162,6 +191,10 @@ class Session:
         for message in reversed(messages):
             if message.get("role") != "assistant":
                 continue
+            if message.get("tool_calls"):
+                # A pending tool plan is not a final answer, and older answers
+                # must not be reported as the result of this unfinished turn.
+                return None
             content = message.get("content")
             if isinstance(content, str):
                 return content.strip() or None
@@ -174,7 +207,9 @@ class Session:
                     and isinstance(part.get("text"), str)
                 ]
                 answer = "\n".join(texts).strip()
-                return answer or None
+                if answer:
+                    return answer
+                return None
             return None
         return None
 

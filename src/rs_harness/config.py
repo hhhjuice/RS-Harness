@@ -65,7 +65,8 @@ class ModelConfig(BaseModel):
 class LoopConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    max_turns: int = Field(default=1, gt=0)
+    max_turns: int = Field(default=20, gt=0)
+    bash_timeout_s: float = Field(default=120, gt=0)
 
 
 class RuntimeConfig(BaseModel):

@@ -12,11 +12,11 @@ RS-Harness 是面向遥感数据智能分析的 Agent Harness。长期目标是�
 
 ```text
 messages[] → OpenAI SDK → assistant message
-                         ├─ 有 tool call：记录并返回 unsupported_action
+                         ├─ 有 tool call：执行并回填 tool message，继续循环
                          └─ 无 tool call：提取文本，结束循环
 ```
 
-v0.1.0 暂不注册工具，因此正常路径只有一次模型调用；消息列表和内容块结构仍按上述模式设计，为后续 MCP 工具接入保留稳定边界。
+v0.1.0 注册五个通用工作区工具；模型可以在预算范围内多次调用并观察回填结果。遥感语义工具仍通过后续 MCP 接入，消息列表和内容块结构保持稳定。
 
 本版本的关键约束：
 
@@ -25,7 +25,7 @@ v0.1.0 暂不注册工具，因此正常路径只有一次模型调用；消息�
 3. **Config + `.env` 分工。** 模型、超时、预算、提示词和会话目录等基础设置从 Config 文件加载；API Key 等敏感环境变量可由项目 `.env` 提供，`.env` 不提交到版本库。
 4. **遥感数据通过 MCP 处理。** Harness 运行时不得直接读取影像像元、执行栅格/矢量算法或绕过 MCP 调用遥感能力。
 5. **Session 是持久化的模型上下文。** 创建一次 session 后，可通过多次 `AgentLoop.run(session_id, request)` 追加交互；一次模型请求不等于一个 session。Session 由调用方显式关闭，不使用 `runs/` 目录或全局 run registry。
-6. **轨迹与证据可追溯。** 用户输入、每次模型响应、工具调用响应（接入后）都要求详细记录保存。
+6. **轨迹与证据可追溯。** 用户输入、每次模型响应和工具调用响应都要求详细记录保存。
 
 ## 2. v0.1.0 范围
 
@@ -45,14 +45,14 @@ v0.1.0 暂不注册工具，因此正常路径只有一次模型调用；消息�
 
 以下功能只保留清晰的扩展边界，不在 v0.1.0 实现：
 
-- MCP 服务发现、工具注册/执行、遥感元数据/预览/波段处理、算法推理和后处理。
+- MCP 服务发现、遥感元数据/预览/波段处理、算法推理和后处理。
 - Hooks、插件系统、权限审批和人工介入。
 - 上下文压缩、摘要、外部记忆或向量数据库；ledger 永久保留完整消息。
 - 多 Agent、任务分解、并行执行、后台任务、流式输出和 Web 服务。
-- 直接读取本地影像，或把影像字节上传给模型。
+- 解码遥感栅格（GeoTIFF 等）的像素或地理信息；web 格式图片（JPEG/PNG/WebP/GIF ≤ 20MB）以 OpenAI `image_url` 视觉输入直传模型，影像字节永不写入轨迹。
 - 仅有影像时自动执行全部遥感能力的探索模式。
 
-参考仓库 s01 用一个 `bash` 工具演示工具回填；RS-Harness v0.1.0 将 `tools=[]`，不实现任何工具 handler。后续 MCP 工具接入时，沿用同一个消息回填循环，不把工具流程硬编码成新的 Agent 类型。
+参考仓库 s02 用 `bash`、文件读写和 `glob` 工具演示工具回填；RS-Harness v0.1.0 提供 `bash`、`read_file`、`write_file`、`edit_file`、`glob`，遥感能力仍保持 MCP 边界。后续 MCP 工具接入时，沿用同一个消息回填循环，不把工具流程硬编码成新的 Agent 类型。
 
 ## 3. 输入与输出契约
 
@@ -66,14 +66,15 @@ v0.1.0 暂不注册工具，因此正常路径只有一次模型调用；消息�
 ```
 
 - `query: string | null`：自然语言指令；空白字符串视为未提供。
-- `image: string | null`：影像路径、URI 或对象 ID，仅作为不透明引用进入 session 状态。
+- `image: string | null`：图片路径、URI 或对象 ID。本地 web 格式文件（JPEG/PNG/WebP/GIF ≤ 20MB）与 http(s) URL 直接作为视觉输入附给模型；遥感栅格等不可直读引用进入 session 状态并附 MCP 限制说明。query 文本中出现的本地图片路径也会被自动识别附加。
+- `--workdir <path>`：工具工作目录；必须是已存在目录，保存为绝对路径。未指定时使用启动目录，恢复会话时沿用已保存值。
 - `query` 和 `image` 至少有一个非空。两者都为空时，CLI 直接结束，不创建 session、不调用模型，也不返回错误对象。
 
 v0.1.0 的模式边界：
 
 | 输入                      | 模式         | v0.1.0 行为                                                                                       |
 | ------------------------- | ------------ | ------------------------------------------------------------------------------------------------- |
-| `query`，可带 `image` | 指令模式     | 必须调用真实模型回答 query。若带 image，提示中明确当前版本没有影像观察事实，不得猜测影像内容。    |
+| `query`，可带 `image` | 指令模式     | 必须调用真实模型回答 query。可直读图片作为视觉输入附给模型；不可直读引用明确标注不可见并附 MCP 限制，不得猜测影像内容。    |
 | 仅`image`               | 探索模式占位 | 创建 session 并返回`not_supported`，说明 MCP/遥感能力目录尚未接入；不读取影像、不伪造分析报告。 |
 | 两者都为空                | 无           | 不启动 session、不调用模型、不输出错误结果。                                                      |
 
@@ -89,7 +90,7 @@ v0.1.0 的模式边界：
 
 ### 4.1 文件与加载规则
 
-基础设置通过 Config 文件提供，默认路径为 `config/default.toml`，CLI 可用 `--config <path>` 指定其他文件。`src/rs_harness/config.py` 中的 `Config` Pydantic 模型负责：
+基础设置通过 Config 文件提供，默认路径为 `config/default.toml`，CLI 可用 `--config <path>` 指定其他文件；工具工作区通过 `--workdir <path>` 指定。`src/rs_harness/config.py` 中的 `Config` Pydantic 模型负责：
 
 1. 读取 TOML；
 2. 解析相对路径（相对于 Config 文件所在目录）；
@@ -112,7 +113,8 @@ timeout_s = 60
 max_tokens = 4096
 
 [loop]
-max_turns = 1
+max_turns = 20
+bash_timeout_s = 120
 
 [runtime]
 sessions_dir = "sessions"
@@ -135,23 +137,25 @@ OPENAI_API_KEY=your-openai-key
 打开已有 Session，读取 messages.jsonl 中的完整上下文
         │
         ▼
-调用 OpenAI Chat Completions 接口（tools=[]）
+调用 OpenAI Chat Completions 接口（提供五个工作区工具）
         │
         ▼
 按 provider 原始结构追加 assistant/tool message 到 messages.jsonl
         │
         ├─ 无 tool call → 提取 text → succeeded
-        ├─ 有 tool call  → v0.1.0 返回 unsupported_action
+        ├─ 有 tool call  → 执行、追加 tool message、继续循环
         ├─ 空文本       → empty_model_response
         └─ 异常/超预算   → failed
 ```
 
 ### 5.2 伪代码
 
-伪代码沿用参考实现的 `while` 和 assistant 回填；`tools=[]` 是 v0.1.0 的硬约束：
+伪代码沿用参考实现的循环和 assistant/tool 回填：
 
 ```python
-def run(session_id: str, request: InputRequest, config: Config) -> InteractionResult:
+import json
+
+def run(session_id: str, request: InputRequest, config: Config, *, workdir=None) -> InteractionResult:
     validate_config(config)
     state = open_session(session_id, config)
     append_message(state, build_user_message(request))
@@ -167,7 +171,7 @@ def run(session_id: str, request: InputRequest, config: Config) -> InteractionRe
             model=config.model.model,
             messages=messages,
             max_tokens=config.model.max_tokens,
-            tools=[],
+            tools=TOOLS,
         )
         assistant_message = response.choices[0].message
         assistant_content = assistant_message.content or ""
@@ -176,7 +180,10 @@ def run(session_id: str, request: InputRequest, config: Config) -> InteractionRe
 
         append_message(state, assistant_message)
         if tool_calls:
-            return interaction_failed(state, code="unsupported_action")
+            for call in tool_calls:
+                output = dispatch_tool(call.function.name, json.loads(call.function.arguments), workdir)
+                append_message(state, {"role": "tool", "tool_call_id": call.id, "content": output})
+            continue
 
         if answer.strip():
             return interaction_success(state, answer)
@@ -185,7 +192,7 @@ def run(session_id: str, request: InputRequest, config: Config) -> InteractionRe
     return interaction_failed(state, code="budget_exceeded")
 ```
 
-每次 `AgentLoop.run(session_id, request)` 都先把 user message 追加到该 session 的 `messages.jsonl`，再从 ledger 重建上下文；调用完成后追加模型实际产生的 message，并返回本轮 `InteractionResult`，session 保持 `running`。不做摘要、压缩、记忆检索或自动重试。未来工具可用时，在 `tool_calls` 分支执行 MCP handler，将结果按 tool message 追加，再进入下一轮；Loop 的决策权仍属于模型。
+每次 `AgentLoop.run(session_id, request)` 都先把 user message 追加到该 session 的 `messages.jsonl`，再从 ledger 重建上下文；每次调用后追加模型实际产生的 message，工具结果按 `tool_call_id` 追加并进入下一轮，直到模型返回文本或达到预算。Session 保持 `running`，不做摘要、压缩、记忆检索或自动重试。Loop 的决策权仍属于模型。
 
 ### 5.3 提示词约束
 
@@ -193,10 +200,10 @@ system prompt 至少要求模型：
 
 - 直接回答 query，使用用户问题的语言；
 - 只依据消息中可见的事实，不编造影像、测量或算法结果；
-- 识别到当前 `tools=[]` 时不要要求伪造工具结果；
+- 只使用系统声明的五个工作区工具；工具结果必须来自实际执行，不得伪造；
 - 不输出隐藏的逐步思考，只返回面向用户的内容。
 
-带 `image` 的 query 必须在 user 消息中附加限制说明：影像引用已收到，但 v0.1.0 尚未通过 MCP 建立影像事实，因此不能据此判断场景、数值或目标。
+带 `image` 的 query：可直读图片（本地 web 格式文件或 http(s) URL）以 `image_url` 块附给模型，模型只描述实际看到的内容；不可直读引用（遥感栅格、超限、缺失、远端对象）在 user 消息中附加限制说明——该引用不可见，不得猜测内容，遥感分析需要 MCP 工具。
 
 ## 6. OpenAI SDK 与核心模块
 
@@ -204,7 +211,7 @@ system prompt 至少要求模型：
 
 v0.1.0 直接在 `AgentLoop` 中创建 `openai.OpenAI` 并调用 `chat.completions.create(...)`。项目不维护 `clients/` 目录、统一客户端协议或客户端工厂；Loop 直接使用 OpenAI 的 `messages` 和 `choices[0].message` 类型。
 
-未来接入工具时，在同一个 Loop 中按 OpenAI 原生 tool call 格式处理，再转换成 MCP 所需的 `tool_result` 消息。
+工作区工具在同一个 Loop 中按 OpenAI 原生 tool call 格式处理；未来的遥感工具继续通过 MCP 接入并复用相同的回填协议。
 
 SDK 初始化或首次调用失败必须返回明确错误；不能切换到 Stub、默认文本或另一家客户端掩盖问题。
 
@@ -213,10 +220,10 @@ SDK 初始化或首次调用失败必须返回明确错误；不能切换到 Stu
 - `AgentLoop`：状态迁移、轮次/预算检查、OpenAI SDK 调用和终态保证；不导入遥感库。
 - `Config`：读取 Config 文件并加载 `.env`，校验模型和预算，生成只读配置快照。
 - `MessageLedger`：将完整 provider message 追加写入 `messages.jsonl`，仅附带序号和时间戳元数据；不生成自定义模型调用事件。
-- `Session`：通过 `create` / `open` 持久化模型上下文，保存 `session.json`、`messages.jsonl`；`close` 只更新终态并返回内存中的 `SessionResult`。
-- `CLI`：`uv run rsh` 默认进入交互循环，支持 `/help`、`/status`、`/close`、`/quit`；同时提供 `create-session`、`ask` 和 `close-session` 脚本入口。
+- `Session`：通过 `create` / `open` 持久化模型上下文，保存 `session.json`、`messages.jsonl`；`close` 只更新终态并返回内存中的 `SessionResult`；`list` 按时间顺序返回 sessions 目录下全部可解析的 session 状态。
+- `CLI`：`uv run rsh` 默认进入交互循环，支持 `/help`、`/status`、`/close`、`/quit`、`/exit`；同时提供 `create-session`、`ask`、`close-session` 和 `list-session` 脚本入口。交互入口及脚本入口支持 `--workdir`，恢复会话时默认沿用其保存的目录。
 
-消息 ledger 不得包含 API key、Authorization header 或影像内容；`image` 只保留不透明引用或脱敏摘要。
+消息 ledger 不得包含 API key、Authorization header 或影像字节；图片在 ledger 中只保留 `image_ref` 证据（路径、MIME、字节数、sha256）或脱敏摘要，`image_url` 数据块在每次请求时从磁盘重建，文件失效则降级为文本说明。
 
 ## 7. 推荐目录结构
 
@@ -241,14 +248,20 @@ RS-Harness/
 │       ├── agent_loop.py           # 最小 Agent Loop
 │       └── runtime/
 │           ├── __init__.py
+│           ├── images.py           # 图片嗅探与视觉输入块
 │           ├── session.py          # Session 创建与生命周期
-│           └── trace.py            # JSONL 轨迹写入
+│           ├── trace.py            # JSONL 轨迹写入
+│           └── tools.py            # 工作区工具定义与分发
 ├── tests/
 │   ├── unit/
-│   │   ├── test_config.py
 │   │   ├── test_agent_loop.py
-│   │   ├── test_session.py
-│   │   └── test_trace.py
+│   │   ├── test_agent_loop_images.py
+│   │   ├── test_agent_loop_tools.py
+│   │   ├── test_cli.py
+│   │   ├── test_config.py
+│   │   ├── test_images.py
+│   │   ├── test_runtime_session.py
+│   │   └── test_tools.py
 │   └── integration/
 │       └── test_openai_client.py
 └── sessions/                       # session 运行时生成，不提交结果
@@ -266,18 +279,18 @@ sessions/<session_id>/
 
 ## 8. 技术栈
 
-| 层次             | 选择                            | 用途与原因                                               |
-| ---------------- | ------------------------------- | -------------------------------------------------------- |
-| 语言             | Python 3.12+                    | 便于实现模块边界、异步扩展和后续 MCP 接入。              |
-| 包管理/构建      | `uv` + `pyproject.toml`     | 锁定依赖并提供可复现运行。                               |
-| 数据契约         | Pydantic 2                      | 校验 Config、输入、session 状态和结果。                  |
-| Config 文件      | TOML + Python 标准库`tomllib` | 集中保存基础设置，便于审查和复现。                       |
-| 敏感配置         | `python-dotenv` + `.env`    | 仅加载 API Key 等敏感环境变量，不覆盖 Config 基础设置。  |
-| OpenAI 客户端    | `openai` Python SDK           | 直接调用 OpenAI Chat Completions 接口。                  |
-| CLI              | Typer                           | 提供默认交互会话、`ask`、session 管理和 `--config`。 |
-| 持久化           | `pathlib` + JSON/JSONL        | 按 session 保存状态和审计轨迹，不使用`runs/`。         |
-| 测试             | pytest                          | 状态/分支单元测试，真实凭据集成测试单独标记。            |
-| 编排             | 自研小型同步 Loop               | 直接体现参考项目的核心模式，不引入 LangGraph/LangChain。 |
+| 层次          | 选择                            | 用途与原因                                               |
+| ------------- | ------------------------------- | -------------------------------------------------------- |
+| 语言          | Python 3.12+                    | 便于实现模块边界、异步扩展和后续 MCP 接入。              |
+| 包管理/构建   | `uv` + `pyproject.toml`     | 锁定依赖并提供可复现运行。                               |
+| 数据契约      | Pydantic 2                      | 校验 Config、输入、session 状态和结果。                  |
+| Config 文件   | TOML + Python 标准库`tomllib` | 集中保存基础设置，便于审查和复现。                       |
+| 敏感配置      | `python-dotenv` + `.env`    | 仅加载 API Key 等敏感环境变量，不覆盖 Config 基础设置。  |
+| OpenAI 客户端 | `openai` Python SDK           | 直接调用 OpenAI Chat Completions 接口。                  |
+| CLI           | Typer                           | 提供默认交互会话、`ask`、session 管理和 `--config`。 |
+| 持久化        | `pathlib` + JSON/JSONL        | 按 session 保存状态和审计轨迹，不使用`runs/`。         |
+| 测试          | pytest                          | 状态/分支单元测试，真实凭据集成测试单独标记。            |
+| 编排          | 自研小型同步 Loop               | 直接体现参考项目的核心模式，不引入 LangGraph/LangChain。 |
 
 模型调用是运行时必需依赖：不提供 Stub/offline 开关或无密钥默认回答；`.env` 只用于提供密钥等敏感环境变量。
 
@@ -287,6 +300,7 @@ sessions/<session_id>/
 # Config 文件中配置 model 和 api_key_env，API Key 放在 .env
 uv run rsh ask --config config/default.toml "什么是 NDVI？"
 uv run rsh ask --config config/default.toml \
+  --workdir . \
   --image s3://bucket/scene.tif \
   "请说明当前版本能否分析这张影像" --json
 ```
@@ -306,11 +320,12 @@ Config 或真实模型不可用时，CLI 使用非零退出码并输出可读错
 - **空输入**：CLI 在创建 session 和模型客户端前直接结束，不调用模型、不写错误结果。
 - **Config 错误**：`failed/config_error`，缺字段、路径不可读或凭据来源无效。
 - **客户端错误**：`failed/model_unavailable`、`failed/model_timeout` 或 `failed/model_response_error`。
-- **模型主动返回 tool call**：`failed/unsupported_action`，完整 assistant message 仍写入 ledger，不执行未知动作。
+- **工具调用**：按调用 ID 执行并追加 `role=tool` 结果；未知工具、参数错误和执行错误作为工具观察回填给模型。
+- **不可恢复的历史工具调用**：`failed/unmatched_tool_call`，提示新建 session，不重放历史副作用。
 - **空文本**：`failed/empty_model_response`。
-- **预算**：默认最多 1 次模型调用、单次 60 秒、最多 4096 输出 token；超出后返回 `failed/budget_exceeded`。v0.1.0 不自动重试，避免重复计费和隐藏延迟。
-- **日志**：所有实际发送或接收的 message 追加到 `messages.jsonl`；不写入自定义模型调用事件。
-- **机密**：API key、Authorization header、完整 Config 密钥字段和影像内容不得进入日志或状态快照。
+- **预算**：默认最多 20 次模型调用、单次 60 秒、最多 4096 输出 token，单个 bash 工具调用默认 120 秒（`[loop] bash_timeout_s`，超时终止整个进程组）；最后一轮的工具结果写入后，超出上限返回 `failed/budget_exceeded`。v0.1.0 不自动重试，避免重复计费和隐藏延迟。
+- **日志**：所有实际发送或接收的 message 追加到 `messages.jsonl`，不写入自定义模型调用事件。循环本身不打印；CLI 通过注入的日志回调在 stdout 输出工具名和结果前 200 个字符（终端为彩色，管道/重定向为纯文本）。使用 `--json` 且发生工具调用时，日志会出现在 JSON payload 之前。
+- **机密**：API key、Authorization header、完整 Config 密钥字段和影像内容不得进入日志或状态快照；工具观察（如 `env` 输出）在写入 ledger、回传模型和输出日志前统一按 `api_key_env` 对应值脱敏为 `[REDACTED]`。
 
 ## 11. 测试与验收标准
 
@@ -318,19 +333,20 @@ Config 或真实模型不可用时，CLI 使用非零退出码并输出可读错
 2. 对于有效输入，缺少 Config、模型名或凭据时运行失败，不生成 Stub、不返回默认文本。
 3. 空请求直接结束，不创建 session、不调用模型、不输出错误结果。
 4. query-only 请求调用一次 OpenAI SDK，追加 assistant 内容并返回非空答案。
-5. query + image 请求不读取影像文件、不声称观察到影像事实，并把限制写入提示/轨迹。
+5. query + image 请求：可直读图片以 `image_url` 视觉输入发送且 base64 不落轨迹；不可直读引用不声称观察到影像事实，并把限制写入提示/轨迹。
 6. image-only 请求返回 `not_supported`，不伪造探索报告。
 7. 客户端超时、网络错误、空响应和非法内容块都会形成明确失败状态和轨迹事件。
-8. `max_turns=1` 时最多一次模型调用；所有路径都有最终状态和停止原因。
+8. 工具调用、结果回填和连续模型调用按调用 ID 保持完整；达到 `max_turns` 时不留下未配对调用。
 9. OpenAI SDK 通过真实服务或受控 SDK transport contract test 验证原生响应提取和 session 记录。
 10. 生产 CLI 不存在 Stub/offline 开关；非敏感基础设置来自 Config 文件，API Key 等敏感值来自 `.env` 或进程环境。
+11. 交互入口的 `/quit` 和 `/exit` 都能保留运行中的 Session；CLI 通过日志回调向 stdout 输出工具名及结果前 200 个字符（含密钥时已脱敏），循环自身保持静默，readline 不可用时仍可启动。
 
 ## 12. 后续演进顺序
 
 在 v0.1.0 基础问答稳定后，按以下顺序扩展，并保持当前 `messages[]` 形状兼容：
 
-1. MCP 客户端、能力目录和工具 handler：在 tool call 分支执行并回填 `tool_result`。
-2. 影像感知：通过 MCP 获取元数据、质量和预览事实，再支持 query + image 问答。
+1. MCP 客户端、能力目录和遥感工具 handler：在现有 tool call 分支执行并回填 `tool_result`。
+2. 影像感知：通过 MCP 获取遥感栅格的元数据、质量和预览事实（生成可直读预览后进入现有视觉输入通道），再支持遥感 query + image 问答。
 3. Skills 按需加载和可控的系统知识注入。
 4. 上下文窗口管理、摘要/压缩、可恢复运行和资源监控。
 5. Hooks、权限审批、记忆、多 Agent 以及仅影像探索模式；探索模式必须让所有 MCP 遥感能力形成明确终态并生成报告。

@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 from pydantic import ValidationError
 
@@ -50,4 +48,19 @@ def test_provider_field_is_rejected():
                 "model": "gpt-test",
                 "api_key_env": "TEST_RS_KEY",
             }
+        )
+
+
+def test_loop_defaults_to_twenty_turns():
+    config = Config(model={"model": "gpt-test", "api_key_env": "TEST_RS_KEY"})
+    assert config.loop.max_turns == 20
+
+
+def test_loop_bash_timeout_defaults_to_120s_and_rejects_non_positive():
+    config = Config(model={"model": "gpt-test", "api_key_env": "TEST_RS_KEY"})
+    assert config.loop.bash_timeout_s == 120
+    with pytest.raises(ValidationError):
+        Config(
+            model={"model": "gpt-test", "api_key_env": "TEST_RS_KEY"},
+            loop={"bash_timeout_s": 0},
         )

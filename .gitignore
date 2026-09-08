@@ -12,6 +12,10 @@ build/
 *.egg-info/
 .DS_Store
 
+.codebase-memory
+workdir
+.zcode
+
 # Runtime session data can contain user prompts and model responses.
 sessions/
 config/sessions/
