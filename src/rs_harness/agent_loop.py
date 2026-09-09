@@ -235,7 +235,7 @@ def _interact(
             {
                 "role": "user",
                 "content": build_user_message_content(
-                    normalized.query, image_reference, effective_workdir
+                    normalized.query, image_reference
                 ),
             }
         )

@@ -1,6 +1,6 @@
 [model]
-model = "moonshotai/Kimi-K2.7-Code"
-base_url = "https://api.siliconflow.cn/v1"                          # empty uses the SDK default endpoint
+model = "deepseek-v4-flash-vision-exp"
+base_url = "https://api.deepseek.com"                          # empty uses the SDK default endpoint
 api_key_env = "OPENAI_API_KEY"
 timeout_s = 60
 max_tokens = 4096

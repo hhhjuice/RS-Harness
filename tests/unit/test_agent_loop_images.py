@@ -85,7 +85,7 @@ def test_local_image_is_sent_as_vision_block_and_ledger_keeps_reference(tmp_path
     assert "data:image/jpeg" not in ledger
 
 
-def test_image_path_typed_into_query_text_is_auto_attached(tmp_path: Path):
+def test_image_path_typed_into_query_text_is_not_auto_attached(tmp_path: Path):
     config = _config(tmp_path)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -103,9 +103,7 @@ def test_image_path_typed_into_query_text_is_auto_attached(tmp_path: Path):
 
     assert result.status == "succeeded"
     content = _user_contents(client.calls[0])[-1]
-    assert isinstance(content, list)
-    assert content[1]["type"] == "image_url"
-    assert content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    assert content == f"描述这张图像。{jpg}"
 
 
 def test_history_reembeds_image_and_degrades_when_file_removed(tmp_path: Path):

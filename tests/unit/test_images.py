@@ -2,7 +2,7 @@ import hashlib
 from pathlib import Path
 
 import rs_harness.runtime.images as images
-from rs_harness.runtime.images import extract_image_paths, inspect_local_image, sniff_mime
+from rs_harness.runtime.images import inspect_local_image, sniff_mime
 
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 12
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
@@ -54,23 +54,3 @@ def test_inspect_local_image_rejects_oversized_files(monkeypatch, tmp_path: Path
 
     assert attachment is None
     assert "too large" in reason
-
-
-def test_extract_image_paths_finds_glued_plain_and_relative_paths(tmp_path: Path):
-    jpg = tmp_path / "a.jpg"
-    jpg.write_bytes(JPEG)
-    tif = tmp_path / "c.tif"
-    tif.write_bytes(TIFF)
-    txt = tmp_path / "b.txt"
-    txt.write_text("b", encoding="utf-8")
-
-    glued = f"描述这张图像。{jpg}，请说明内容。"
-    assert extract_image_paths(glued, base_dir=tmp_path) == [str(jpg.resolve())]
-
-    plain = f"看 {jpg} 还有 {tif} 与 {txt}"
-    assert extract_image_paths(plain, base_dir=tmp_path) == [str(jpg.resolve())]
-
-    relative = "帮我看一下 a.jpg"
-    assert extract_image_paths(relative, base_dir=tmp_path) == [str(jpg.resolve())]
-
-    assert extract_image_paths("这里没有任何路径") == []

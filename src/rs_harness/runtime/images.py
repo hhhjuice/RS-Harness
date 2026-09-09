@@ -7,7 +7,6 @@ other remote-sensing semantics stay behind the future MCP boundary.
 from __future__ import annotations
 
 import hashlib
-import re
 from pathlib import Path
 from typing import Any
 
@@ -18,18 +17,11 @@ __all__ = [
     "ImageAttachment",
     "sniff_mime",
     "inspect_local_image",
-    "extract_image_paths",
 ]
 
-MAX_IMAGE_BYTES = 20 * 1024 * 1024
+MAX_IMAGE_BYTES = 32 * 1024 * 1024
 
 _SNIFF_LEN = 16
-
-# Paths glued to surrounding text (e.g. "看这张图。/abs/path/a.jpg") need a
-# substring scan; whitespace tokens additionally cover bare relative names.
-_PATH_LIKE = re.compile(r"[~/]?[\w.\-]+(?:/[\w.\-]+)+")
-_TRIM = "\"'`(),.;:!?[]{}。，；：！？）】》「」"
-
 
 class ImageAttachment(BaseModel):
     """Evidence about one directly viewable local image."""
@@ -91,43 +83,3 @@ def inspect_local_image(path: str | Path) -> tuple[ImageAttachment | None, str]:
         sha256=digest.hexdigest(),
     )
     return attachment, ""
-
-
-def extract_image_paths(query: str, *, base_dir: str | Path | None = None) -> list[str]:
-    """Find existing local image files mentioned in a query.
-
-    Candidates come from embedded path-like substrings and whitespace tokens;
-    only files whose signature is a supported image format are returned, so
-    prose mentioning ordinary files never triggers an attachment.
-    """
-
-    candidates = [match.group(0) for match in _PATH_LIKE.finditer(query)]
-    candidates.extend(query.split())
-    paths: list[str] = []
-    for candidate in candidates:
-        for variant in (candidate, candidate.strip(_TRIM)):
-            resolved = _resolve_existing_image(variant, base_dir)
-            if resolved is not None and resolved not in paths:
-                paths.append(resolved)
-    return paths
-
-
-def _resolve_existing_image(candidate: str, base_dir: str | Path | None) -> str | None:
-    text = candidate.strip()
-    if not text:
-        return None
-    file_path = Path(text).expanduser()
-    if base_dir is not None and not file_path.is_absolute():
-        under_base = Path(base_dir) / file_path
-        if under_base.is_file():
-            file_path = under_base
-    if not file_path.is_file():
-        return None
-    try:
-        with file_path.open("rb") as handle:
-            head = handle.read(_SNIFF_LEN)
-    except OSError:
-        return None
-    if sniff_mime(head) is None:
-        return None
-    return str(file_path.resolve())

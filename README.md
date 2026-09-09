@@ -11,7 +11,8 @@ offline or Stub client.
 ```bash
 uv sync
 cp .env.example .env
-# Put your OpenAI API key in .env.
+# Put the API key for the provider configured in config/default.toml in .env.
+# The default config uses DeepSeek Vision and reads it from OPENAI_API_KEY.
 # Start an interactive session directly.
 uv run rsh --config config/default.toml --workdir .
 # Enter questions at the `rsh>` prompt; use /help, /status, /quit, /exit or /close.
@@ -29,8 +30,10 @@ uv run rsh ask --config config/default.toml --image workdir/photo.jpg "描述这
 uv run rsh close-session --config config/default.toml --session-id <SESSION_ID>
 ```
 
-Set `model` and `api_key_env = "OPENAI_API_KEY"` in a Config file (see
-`config/example.toml`). Use `--json` to print the session result. When a request
+Set `model`, `base_url`, and `api_key_env` in a Config file (see
+`config/example.toml`). The default config uses `deepseek-v4-flash-vision-exp`
+at `https://api.deepseek.com` and reads the provider key from
+`OPENAI_API_KEY`. Use `--json` to print the session result. When a request
 invokes tools, the tool log lines are written to stdout before the JSON payload.
 
 Each session writes the following files under `sessions/<session_id>/`:
@@ -52,11 +55,12 @@ text and the image is attached to the next model request as an `image_url`
 content block; the ledger stores only an `image_ref` record.
 
 Images enter as standard vision input: pass a local JPEG/PNG/WebP/GIF file
-(≤ 20 MB) or an http(s) URL via `--image`, or simply paste a local image path
-into the query text. The model receives the image as an `image_url` content
-block; the ledger keeps only an `image_ref` record (path, mime, size, sha256)
-and the bytes are re-read from disk on every request, so image data never
-persists in the trace. Remote-sensing rasters (GeoTIFF and similar) stay
+(≤ 32 MB) or an http(s) URL via `--image`. To inspect a local image without
+`--image`, let the model use `glob` and `read_image`; query text is not scanned
+for image paths. The model receives the image as an `image_url` content block;
+the ledger keeps only an `image_ref` record (path, mime, size, sha256) and the
+bytes are re-read from disk on every request, so image data never persists in
+the trace. Remote-sensing rasters (GeoTIFF and similar) stay
 opaque: the harness never decodes pixels, and the message states that their
 analysis requires MCP tools.
 

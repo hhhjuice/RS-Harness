@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from .images import MAX_IMAGE_BYTES, extract_image_paths, inspect_local_image, sniff_mime
+from .images import MAX_IMAGE_BYTES, inspect_local_image, sniff_mime
 from .trace import _json_safe
 
 __all__ = [
@@ -132,7 +132,6 @@ def decode_tool_arguments(raw_arguments: Any) -> tuple[dict[str, Any], str | Non
 def build_user_message_content(
     query: str,
     image_reference: str | None,
-    workdir: str | None,
 ) -> Any:
     """Build the user content, attaching directly viewable images as blocks.
 
@@ -142,37 +141,19 @@ def build_user_message_content(
     ``image_url`` data URLs at request time.
     """
 
-    candidates: list[str] = []
-    if image_reference is not None:
-        candidates.append(image_reference)
-    candidates.extend(extract_image_paths(query, base_dir=workdir))
-    seen: set[str] = set()
-    ordered = [c for c in candidates if not (c in seen or seen.add(c))]
-    if not ordered:
+    if image_reference is None:
         return query
 
-    blocks: list[dict[str, Any]] = []
-    attached: list[str] = []
-    opaque: list[tuple[str, str]] = []
-    for candidate in ordered:
-        block, reason = classify_image_reference(candidate)
-        if block is not None:
-            blocks.append(block)
-            attached.append(candidate)
-        else:
-            opaque.append((candidate, reason))
-    text = query
-    for path in attached:
-        text += f"\nImage attached: {path}"
-    for path, reason in opaque:
-        text += (
-            f"\nImage reference received: {path} (not directly viewable: {reason}). "
+    block, reason = classify_image_reference(image_reference)
+    if block is None:
+        return (
+            f"{query}\nImage reference received: {image_reference} "
+            f"(not directly viewable: {reason}). "
             "RS-Harness cannot view this image; do not guess its content. "
             "Remote-sensing analysis requires MCP tools."
         )
-    if not blocks:
-        return text
-    return [{"type": "text", "text": text}, *blocks]
+    text = f"{query}\nImage attached: {image_reference}"
+    return [{"type": "text", "text": text}, block]
 
 
 def classify_image_reference(reference: str) -> tuple[dict[str, Any] | None, str]:

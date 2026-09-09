@@ -49,7 +49,7 @@ v0.1.0 注册六个通用工作区工具；模型可以在预算范围内多次�
 - Hooks、插件系统、权限审批和人工介入。
 - 上下文压缩、摘要、外部记忆或向量数据库；ledger 永久保留完整消息。
 - 多 Agent、任务分解、并行执行、后台任务、流式输出和 Web 服务。
-- 解码遥感栅格（GeoTIFF 等）的像素或地理信息；web 格式图片（JPEG/PNG/WebP/GIF ≤ 20MB）以 OpenAI `image_url` 视觉输入直传模型，影像字节永不写入轨迹。
+- 解码遥感栅格（GeoTIFF 等）的像素或地理信息；web 格式图片（JPEG/PNG/WebP/GIF ≤ 32MB）以 OpenAI `image_url` 视觉输入直传模型，影像字节永不写入轨迹。
 - 仅有影像时自动执行全部遥感能力的探索模式。
 
 参考仓库 s02 用 `bash`、文件读写和 `glob` 工具演示工具回填；RS-Harness v0.1.0 提供 `bash`、`read_file`、`write_file`、`edit_file`、`glob`、`read_image`，遥感能力仍保持 MCP 边界。后续 MCP 工具接入时，沿用同一个消息回填循环，不把工具流程硬编码成新的 Agent 类型。
@@ -66,7 +66,7 @@ v0.1.0 注册六个通用工作区工具；模型可以在预算范围内多次�
 ```
 
 - `query: string | null`：自然语言指令；空白字符串视为未提供。
-- `image: string | null`：图片路径、URI 或对象 ID。本地 web 格式文件（JPEG/PNG/WebP/GIF ≤ 20MB）与 http(s) URL 直接作为视觉输入附给模型；遥感栅格等不可直读引用进入 session 状态并附 MCP 限制说明。query 文本中出现的本地图片路径也会被自动识别附加。
+- `image: string | null`：图片路径、URI 或对象 ID。本地 web 格式文件（JPEG/PNG/WebP/GIF ≤ 32MB）与 http(s) URL 直接作为视觉输入附给模型；遥感栅格等不可直读引用进入 session 状态并附 MCP 限制说明。query 文本中的图片路径不会被自动附加；模型需要时可调用 `glob` 和 `read_image`。
 - `--workdir <path>`：工具工作目录；必须是已存在目录，保存为绝对路径。未指定时使用启动目录，恢复会话时沿用已保存值。
 - `query` 和 `image` 至少有一个非空。两者都为空时，CLI 直接结束，不创建 session、不调用模型，也不返回错误对象。
 
@@ -203,7 +203,7 @@ system prompt 至少要求模型：
 - 只使用系统声明的六个工作区工具；工具结果必须来自实际执行，不得伪造；
 - 不输出隐藏的逐步思考，只返回面向用户的内容。
 
-带 `image` 的 query：可直读图片（本地 web 格式文件或 http(s) URL）以 `image_url` 块附给模型，模型只描述实际看到的内容；不可直读引用（遥感栅格、超限、缺失、远端对象）在 user 消息中附加限制说明——该引用不可见，不得猜测内容，遥感分析需要 MCP 工具。
+带 `image` 字段的 query：可直读图片（本地 web 格式文件或 http(s) URL）以 `image_url` 块附给模型，模型只描述实际看到的内容；不可直读引用（遥感栅格、超限、缺失、远端对象）在 user 消息中附加限制说明——该引用不可见，不得猜测内容，遥感分析需要 MCP 工具。query 文本本身不会自动解析图片路径。
 
 用户要求查看本地图片但没有提供路径时，模型可先用 `glob` 查找工作区文件，再调用 `read_image`。工具结果先以文本 tool message 记录，再追加带 `image_ref` 的 user 消息；下一轮请求将其重建为 `image_url`，ledger 不保存图片字节。
 
