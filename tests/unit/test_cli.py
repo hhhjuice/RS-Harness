@@ -9,7 +9,12 @@ from rs_harness.config import ConfigError
 from rs_harness.runtime.session import InteractionResult, SessionResult, SessionState
 
 
-def _fake_session(session_id: str = "session-1", *, status: str = "running"):
+def _fake_session(
+    session_id: str = "session-1",
+    *,
+    status: str = "running",
+    history: list[dict[str, object]] | None = None,
+):
     """Build the minimal session object consumed by ``_interactive_impl``."""
 
     state = SessionState(session_id=session_id, status=status)  # type: ignore[arg-type]
@@ -18,6 +23,10 @@ def _fake_session(session_id: str = "session-1", *, status: str = "running"):
         def __init__(self):
             self.state = state
             self.closed = False
+            self.history = history or []
+
+        def messages(self):
+            return self.history
 
         def close(self):
             self.closed = True
@@ -29,6 +38,32 @@ def _fake_session(session_id: str = "session-1", *, status: str = "running"):
             )
 
     return FakeSession()
+
+
+def test_format_session_history_keeps_user_and_assistant_text_only():
+    messages = [
+        {"role": "system", "content": "system prompt"},
+        {"role": "user", "content": "first question\nwith context"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "call-1"}]},
+        {"role": "tool", "content": "large tool result"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "second question"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}},
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "answer"}, {"type": "image_ref"}],
+        },
+    ]
+
+    assert cli._format_session_history(messages) == (
+        "user> first question\nwith context\n"
+        "user> second question\n"
+        "assistant> answer"
+    )
 
 
 def test_ask_without_session_id_creates_one(monkeypatch, tmp_path: Path, capsys):
@@ -156,11 +191,20 @@ def test_interactive_creates_session_and_reuses_it_for_multiple_inputs(monkeypat
     assert "answer: first question" in output
     assert "answer: second question" in output
     assert "Session remains running: generated" in output
+    assert "Session history:" not in output
 
 
 def test_interactive_resume_does_not_create_new_session(monkeypatch, tmp_path, capsys):
     config = object()
-    session = _fake_session("existing")
+    session = _fake_session(
+        "existing",
+        history=[
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "previous question"},
+            {"role": "tool", "content": "tool result"},
+            {"role": "assistant", "content": "previous answer"},
+        ],
+    )
     opened = []
     monkeypatch.setattr(cli.Config, "load", lambda _: config)
     monkeypatch.setattr(cli, "create_session", lambda loaded: (_ for _ in ()).throw(AssertionError("must not create")))
@@ -170,7 +214,11 @@ def test_interactive_resume_does_not_create_new_session(monkeypatch, tmp_path, c
 
     assert cli._interactive_impl(tmp_path / "config.toml", "existing") == 0
     assert opened == ["existing"]
-    assert "Resume with: uv run rsh --session-id existing" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "Session history:\nuser> previous question\nassistant> previous answer" in output
+    assert output.index("Session history:") < output.index("Type /help")
+    assert "tool result" not in output
+    assert "Resume with: uv run rsh --session-id existing" in output
 
 
 def test_interactive_exit_alias_leaves_session_running(monkeypatch, tmp_path, capsys):

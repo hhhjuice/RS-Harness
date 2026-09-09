@@ -15,6 +15,7 @@ cp .env.example .env
 # Start an interactive session directly.
 uv run rsh --config config/default.toml --workdir .
 # Enter questions at the `rsh>` prompt; use /help, /status, /quit, /exit or /close.
+# Resuming with --session-id automatically shows prior user/assistant history.
 # Create a persistent conversation and note the returned session id.
 uv run rsh create-session --config config/default.toml --workdir .
 # List every session recorded under the configured sessions directory.
@@ -61,7 +62,9 @@ analysis requires MCP tools.
 
 `ask` appends one user interaction and the model's message(s), including any
 tool calls and tool results, then leaves the
-session open. Reusing `--session-id` restores the full prior context. When the
+session open. Reusing `--session-id` restores the full prior context. In the
+interactive client, the restored session's user and assistant text is shown
+before the prompt; system messages and tool details remain hidden. When the
 option is omitted, a new session is created for that invocation; use `--json`
 to obtain its generated `session_id`. Empty query and image input exits
 quietly; a closed session rejects further asks. A session with an incomplete

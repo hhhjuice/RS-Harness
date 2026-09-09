@@ -203,6 +203,33 @@ def _echo(message: str, *, err: bool = False) -> None:
     print(message, file=sys.stderr if err else sys.stdout)
 
 
+def _format_session_history(messages: list[dict[str, object]]) -> str:
+    """Render user and assistant text from a session ledger for the CLI."""
+
+    entries: list[str] = []
+    for message in messages:
+        role = message.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            text = content.strip()
+        elif isinstance(content, list):
+            text_blocks = [
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict)
+                and part.get("type", "text") == "text"
+                and isinstance(part.get("text"), str)
+            ]
+            text = "\n".join(text_blocks).strip()
+        else:
+            text = ""
+        if text:
+            entries.append(f"{role}> {text}")
+    return "\n".join(entries)
+
+
 def _cli_tool_log(name: str, preview: str) -> None:
     # Tool logs share stdout with the answer/JSON payload; keep escape codes
     # out of pipes and redirected output.
@@ -218,6 +245,7 @@ def _interactive_impl(
     session_id: str | None,
     workdir: Path | str | None = None,
 ) -> int:
+    resumed = bool(session_id)
     try:
         config = Config.load(config_path)
         if session_id:
@@ -231,6 +259,10 @@ def _interactive_impl(
 
     session_id = session.state.session_id
     _echo(f"rsh session {session_id}")
+    if resumed:
+        history = _format_session_history(session.messages())
+        if history:
+            _echo(f"Session history:\n{history}\n")
     _echo("Type /help for commands.\n")
     while True:
         try:
