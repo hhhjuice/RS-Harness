@@ -67,7 +67,7 @@ v0.1.0 注册六个通用工作区工具；模型可以在预算范围内多次�
 
 - `query: string | null`：自然语言指令；空白字符串视为未提供。
 - `image: string | null`：图片路径、URI 或对象 ID。本地 web 格式文件（JPEG/PNG/WebP/GIF ≤ 32MB）与 http(s) URL 直接作为视觉输入附给模型；遥感栅格等不可直读引用进入 session 状态并附 MCP 限制说明。query 文本中的图片路径不会被自动附加；模型需要时可调用 `glob` 和 `read_image`。
-- `--workdir <path>`：工具工作目录；必须是已存在目录，保存为绝对路径。未指定时使用启动目录，恢复会话时沿用已保存值。
+- `--workdir <path>`：工具工作目录；必须是已存在目录，保存为绝对路径。未指定时使用启动目录。workdir 与 session 强绑定，恢复 session 时不能切换目录；文件创建、修改和编辑只能发生在该目录内。
 - `query` 和 `image` 至少有一个非空。两者都为空时，CLI 直接结束，不创建 session、不调用模型，也不返回错误对象。
 
 v0.1.0 的模式边界：
@@ -97,6 +97,8 @@ v0.1.0 的模式边界：
 3. 校验 API key 环境变量名、正数预算和必需字段；
 4. 生成不可变的运行配置快照；
 5. 配置只在运行时使用，session 文件和消息 ledger 永不写入完整 API key。
+
+`system_prompt_file` 保存基础系统指令，必须包含 `{workdir}` 占位符。缺少该占位符时配置校验失败；Session 创建时将其替换为固定的绝对工作目录。文件创建、修改和编辑只能发生在该目录内。
 
 Config 文件负责非敏感基础设置；API Key 等敏感值通过项目 `.env` 注入。启动时使用 `python-dotenv` 读取 Config 指定的 `.env` 文件，`api_key_env` 再从进程环境中解析实际密钥。除这些显式声明的敏感值外，其他环境变量不得覆盖 Config 文件。`.env` 必须加入 `.gitignore`，生产环境也可使用部署平台注入的同名环境变量。
 
@@ -199,9 +201,7 @@ def run(session_id: str, request: InputRequest, config: Config, *, workdir=None)
 system prompt 至少要求模型：
 
 - 直接回答 query，使用用户问题的语言；
-- 只依据消息中可见的事实，不编造影像、测量或算法结果；
-- 只使用系统声明的六个工作区工具；工具结果必须来自实际执行，不得伪造；
-- 不输出隐藏的逐步思考，只返回面向用户的内容。
+- 遵守 system message 中声明的固定工作目录；文件创建、修改和编辑只能发生在该目录内。
 
 带 `image` 字段的 query：可直读图片（本地 web 格式文件或 http(s) URL）以 `image_url` 块附给模型，模型只描述实际看到的内容；不可直读引用（遥感栅格、超限、缺失、远端对象）在 user 消息中附加限制说明——该引用不可见，不得猜测内容，遥感分析需要 MCP 工具。query 文本本身不会自动解析图片路径。
 
@@ -239,7 +239,7 @@ RS-Harness/
 │   └── example.toml                # 不含真实凭据的示例
 ├── .env.example                    # API Key 变量名示例，不含真实密钥
 ├── prompts/
-│   └── system.md                   # 最小系统指令
+│   └── system.md                   # 系统指令与 session 工作目录约束
 ├── docs/
 │   └── 初版Harness设计.md
 ├── src/

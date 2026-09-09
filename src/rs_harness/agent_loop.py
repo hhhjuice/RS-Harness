@@ -20,7 +20,13 @@ from .runtime.messages import (
     messages_for_model,
     safe_image_reference,
 )
-from .runtime.session import ErrorInfo, InteractionResult, Session, SessionResult
+from .runtime.session import (
+    SYSTEM_CONTEXT_VERSION,
+    ErrorInfo,
+    InteractionResult,
+    Session,
+    SessionResult,
+)
 from .runtime.tools import TOOLS, dispatch_tool, normalize_workdir
 
 __all__ = [
@@ -176,10 +182,25 @@ def _interact(
             session_status=session.state.status,
         )
 
-    try:
-        effective_workdir = normalize_workdir(
-            workdir if workdir is not None else session.state.workdir
+    if session.state.system_context_version != SYSTEM_CONTEXT_VERSION:
+        raise _LoopFailure(
+            "session_context_missing",
+            "session was created without the current system context; create a new session",
+            turn=session.state.turn,
         )
+
+    try:
+        effective_workdir = normalize_workdir(session.state.workdir)
+        if workdir is not None:
+            requested_workdir = normalize_workdir(workdir)
+            if requested_workdir != effective_workdir:
+                raise _LoopFailure(
+                    "workdir_mismatch",
+                    "session is bound to a different workdir",
+                    turn=session.state.turn,
+                )
+    except _LoopFailure:
+        raise
     except Exception as exc:
         raise _LoopFailure("runtime_error", str(exc), turn=session.state.turn, record=True)
 
@@ -192,9 +213,6 @@ def _interact(
             turn=session.state.turn,
             record=True,
         )
-
-    session.state.workdir = effective_workdir
-    _ensure_tool_context_unlocked(session, effective_workdir)
 
     if normalized.query is None:
         try:
@@ -383,32 +401,6 @@ def _execute_tool_calls(
         }
         session.append(image_message)
         messages.append(image_message)
-
-
-_TOOL_CONTEXT_MARKER = "RS-Harness tool context v1"
-
-
-def _ensure_tool_context_unlocked(session: Session, workdir: str) -> None:
-    """Add a deterministic capability/workspace note once per workspace."""
-
-    content = (
-        f"{_TOOL_CONTEXT_MARKER}\n"
-        "Available tools: bash, read_file, write_file, edit_file, glob, read_image.\n"
-        "Use read_image for local image inspection; use glob first when the image path is unclear.\n"
-        f"Working directory: {workdir}\n"
-        "File-tool paths stay inside this directory. Tool results are observations; "
-        "remote-sensing semantics remain behind MCP."
-    )
-    for message in reversed(session.ledger.messages()):
-        if message.get("role") != "system":
-            continue
-        if isinstance(message.get("content"), str) and message["content"].startswith(
-            f"{_TOOL_CONTEXT_MARKER}\n"
-        ):
-            if message.get("content") == content:
-                return
-            break
-    session.append({"role": "system", "content": content})
 
 
 def _classify_model_exception(exc: Exception) -> str:

@@ -10,7 +10,11 @@ def make_config(tmp_path: Path):
     from rs_harness.config import Config
 
     prompt = tmp_path / "system.md"
-    prompt.write_text("system", encoding="utf-8")
+    prompt.write_text(
+        "system\nWorking directory: {workdir}\n"
+        "Only create, modify, or edit files inside this directory.",
+        encoding="utf-8",
+    )
     return Config(
         model={"model": "test-model", "api_key_env": "UNUSED_RS_KEY"},
         runtime={
@@ -22,15 +26,27 @@ def make_config(tmp_path: Path):
 
 
 def test_create_open_and_append_complete_message_ledger(tmp_path):
-    session = Session.create(make_config(tmp_path))
+    config = make_config(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    session = Session.create(config, workdir=workspace)
     assert session.state.status == "running"
-    assert session.messages() == [{"role": "system", "content": "system"}]
+    assert session.messages() == [
+        {
+            "role": "system",
+            "content": (
+                f"system\nWorking directory: {workspace.resolve()}\n"
+                "Only create, modify, or edit files inside this directory."
+            ),
+        }
+    ]
+    assert session.state.system_context_version == 1
 
     session.append_message({"role": "user", "content": "hello"})
     session.append_message(
         {"role": "assistant", "content": "hi", "tool_calls": [{"id": "c1"}]}
     )
-    reopened = Session.open(make_config(tmp_path), session.state.session_id)
+    reopened = Session.open(config, session.state.session_id)
     assert reopened.messages()[-2:] == [
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi", "tool_calls": [{"id": "c1"}]},

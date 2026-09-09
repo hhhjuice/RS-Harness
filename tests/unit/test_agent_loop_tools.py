@@ -24,7 +24,11 @@ class SequenceClient:
 
 def _config(tmp_path: Path, *, max_turns: int = 20) -> Config:
     prompt = tmp_path / "system.md"
-    prompt.write_text("system", encoding="utf-8")
+    prompt.write_text(
+        "system\nWorking directory: {workdir}\n"
+        "Only create, modify, or edit files inside this directory.",
+        encoding="utf-8",
+    )
     return Config(
         model={"model": "test-model", "api_key_env": "UNUSED_RS_KEY"},
         loop={"max_turns": max_turns},
@@ -417,7 +421,7 @@ def test_duplicate_call_ids_are_rejected_before_any_tool_runs(tmp_path: Path):
     assert not (workspace / "y").exists()
 
 
-def test_workdir_is_persisted_and_explicit_run_override_is_used(tmp_path: Path):
+def test_workdir_is_persisted_and_explicit_mismatch_is_rejected(tmp_path: Path):
     config = _config(tmp_path)
     first = tmp_path / "first"
     second = tmp_path / "second"
@@ -426,30 +430,32 @@ def test_workdir_is_persisted_and_explicit_run_override_is_used(tmp_path: Path):
     session = create_session(config, workdir=first)
     client = SequenceClient([_response("ok")])
 
-    result = run(session.state.session_id, {"query": "q"}, config, openai_sdk_client=client, workdir=second)
-
-    assert result.status == "succeeded"
-    reopened = Session.open(config, session.state.session_id)
-    assert reopened.state.workdir == str(second.resolve())
-    assert any(
-        message.get("role") == "system" and str(second.resolve()) in message.get("content", "")
-        for message in reopened.messages()
+    result = run(
+        session.state.session_id,
+        {"query": "q"},
+        config,
+        openai_sdk_client=client,
+        workdir=second,
     )
 
+    assert result.status == "failed"
+    assert result.errors[0].code == "workdir_mismatch"
+    reopened = Session.open(config, session.state.session_id)
+    assert reopened.state.workdir == str(first.resolve())
+    assert len([message for message in reopened.messages() if message["role"] == "system"]) == 1
 
-def test_workdir_change_back_adds_current_context_note(tmp_path: Path):
+
+def test_workdir_is_reused_without_adding_system_messages(tmp_path: Path):
     config = _config(tmp_path)
     first = tmp_path / "first"
-    second = tmp_path / "second"
     first.mkdir()
-    second.mkdir()
     session = create_session(config, workdir=first)
     client = SequenceClient([_response("one"), _response("two"), _response("three")])
     run(session.state.session_id, {"query": "1"}, config, openai_sdk_client=client)
-    run(session.state.session_id, {"query": "2"}, config, openai_sdk_client=client, workdir=second)
-    run(session.state.session_id, {"query": "3"}, config, openai_sdk_client=client, workdir=first)
-    notes = [m for m in Session.open(config, session.state.session_id).messages() if m.get("role") == "system" and "tool context" in m.get("content", "")]
-    assert [str(first.resolve()) in n["content"] for n in notes] == [True, False, True]
+    run(session.state.session_id, {"query": "2"}, config, openai_sdk_client=client)
+    run(session.state.session_id, {"query": "3"}, config, openai_sdk_client=client)
+    messages = Session.open(config, session.state.session_id).messages()
+    assert len([message for message in messages if message["role"] == "system"]) == 1
 
 
 def test_unmatched_historical_tool_call_is_not_replayed(tmp_path: Path):

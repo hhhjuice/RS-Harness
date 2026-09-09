@@ -35,6 +35,11 @@ Set `model`, `base_url`, and `api_key_env` in a Config file (see
 at `https://api.deepseek.com` and reads the provider key from
 `OPENAI_API_KEY`. Use `--json` to print the session result. When a request
 invokes tools, the tool log lines are written to stdout before the JSON payload.
+The system prompt is configurable through `system_prompt_file` under
+`[runtime]`; it must contain `{workdir}` and is rendered with the session's
+fixed directory when the session is created. File creation, modification, and
+editing are restricted to that directory, and a session cannot be resumed with
+a different workdir.
 
 Each session writes the following files under `sessions/<session_id>/`:
 

@@ -138,17 +138,22 @@ class Config(BaseModel):
             )
         return value
 
-    def system_prompt(self) -> str:
-        try:
-            prompt = self.runtime.system_prompt_file.read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as exc:
-            raise ConfigError(
-                "config_error",
-                f"Unable to read system prompt {self.runtime.system_prompt_file}: {exc}",
-            ) from exc
+    def system_prompt(self, workdir: str) -> str:
+        prompt = self._read_prompt(self.runtime.system_prompt_file, "system prompt")
         if not prompt.strip():
             raise ConfigError("config_error", "System prompt must not be empty")
-        return prompt
+        if "{workdir}" not in prompt:
+            raise ConfigError(
+                "config_error", "System prompt must contain the {workdir} placeholder"
+            )
+        return prompt.replace("{workdir}", workdir)
+
+    @staticmethod
+    def _read_prompt(path: Path, label: str) -> str:
+        try:
+            return path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise ConfigError("config_error", f"Unable to read {label} {path}: {exc}") from exc
 
     def summary(self) -> dict[str, object]:
         """Return a safe Config summary suitable for trace events."""

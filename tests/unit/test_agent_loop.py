@@ -9,11 +9,19 @@ from rs_harness.runtime import Session
 
 def make_config(tmp_path: Path, *, max_turns: int = 20) -> Config:
     prompt = tmp_path / "system.md"
-    prompt.write_text("system", encoding="utf-8")
+    prompt.write_text(
+        "system\nWorking directory: {workdir}\n"
+        "Only create, modify, or edit files inside this directory.",
+        encoding="utf-8",
+    )
     return Config(
         model={"model": "test-model", "api_key_env": "UNUSED_RS_KEY"},
         loop={"max_turns": max_turns},
-        runtime={"sessions_dir": tmp_path / "sessions", "system_prompt_file": prompt, "dotenv_file": tmp_path / "missing.env"},
+        runtime={
+            "sessions_dir": tmp_path / "sessions",
+            "system_prompt_file": prompt,
+            "dotenv_file": tmp_path / "missing.env",
+        },
     )
 
 
@@ -36,7 +44,15 @@ def test_empty_request_is_rejected_without_message(tmp_path):
     result = run(session.state.session_id, InputRequest(), config)
     assert result.status == "failed"
     assert result.errors[0].code == "empty_input"
-    assert session.messages() == [{"role": "system", "content": "system"}]
+    assert session.messages() == [
+        {
+            "role": "system",
+            "content": (
+                f"system\nWorking directory: {session.state.workdir}\n"
+                "Only create, modify, or edit files inside this directory."
+            ),
+        }
+    ]
 
 
 def test_image_only_does_not_initialize_model(tmp_path):
@@ -54,7 +70,7 @@ def test_openai_answer_is_recorded_and_context_reused(tmp_path):
     result = run(session.state.session_id, InputRequest(query="question"), config, openai_sdk_client=fake)
     assert result.status == "succeeded"
     assert result.answer == "answer"
-    assert fake.calls[0]["messages"][0] == {"role": "system", "content": "system"}
+    assert fake.calls[0]["messages"][0] == session.messages()[0]
     assert len(json.loads((session.path / "messages.jsonl").read_text().splitlines()[-1])["message"]) >= 2
     fake.content = "follow-up"
     run(session.state.session_id, InputRequest(query="again"), config, openai_sdk_client=fake)
@@ -97,3 +113,22 @@ def test_closed_session_reports_closed_status(tmp_path):
     assert result.status == "failed"
     assert result.errors[0].code == "session_closed"
     assert result.session_status == "closed"
+
+
+def test_legacy_session_without_system_context_is_rejected(tmp_path):
+    config = make_config(tmp_path)
+    session = create_session(config)
+    state_path = session.path / "session.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state.pop("system_context_version")
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    result = run(
+        session.state.session_id,
+        InputRequest(query="question"),
+        config,
+        openai_sdk_client=FakeOpenAI("unused"),
+    )
+
+    assert result.status == "failed"
+    assert result.errors[0].code == "session_context_missing"

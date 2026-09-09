@@ -23,7 +23,11 @@ class SequenceClient:
 
 def _config(tmp_path: Path) -> Config:
     prompt = tmp_path / "system.md"
-    prompt.write_text("system", encoding="utf-8")
+    prompt.write_text(
+        "system\nWorking directory: {workdir}\n"
+        "Only create, modify, or edit files inside this directory.",
+        encoding="utf-8",
+    )
     return Config(
         model={"model": "test-model", "api_key_env": "UNUSED_RS_KEY"},
         loop={"max_turns": 20},

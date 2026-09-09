@@ -17,6 +17,7 @@ from .tools import normalize_workdir
 
 SessionStatus = Literal["running", "closed", "failed"]
 InteractionStatus = Literal["succeeded", "not_supported", "failed"]
+SYSTEM_CONTEXT_VERSION = 1
 
 
 class ErrorInfo(BaseModel):
@@ -36,6 +37,7 @@ class SessionState(BaseModel):
     query: str | None = None
     image: str | None = None
     workdir: str | None = None
+    system_context_version: int | None = None
     turn: int = 0
     message_count: int = 0
     errors: list[ErrorInfo] = Field(default_factory=list)
@@ -85,8 +87,8 @@ class Session:
         image: str | None = None,
         workdir: str | Path | None = None,
     ) -> "Session":
-        system_prompt = config.system_prompt()
         resolved_workdir = normalize_workdir(workdir)
+        system_prompt = config.system_prompt(resolved_workdir)
         session_id = _session_id()
         path = config.runtime.sessions_dir / session_id
         path.mkdir(parents=True, exist_ok=False)
@@ -97,6 +99,7 @@ class Session:
                 query=query,
                 image=image,
                 workdir=resolved_workdir,
+                system_context_version=SYSTEM_CONTEXT_VERSION,
                 started_at=utc_now(),
             ),
             path,
