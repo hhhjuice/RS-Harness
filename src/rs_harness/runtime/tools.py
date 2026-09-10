@@ -47,14 +47,19 @@ def _workspace(workdir: str | Path | None = None) -> Path:
     return Path(normalize_workdir(workdir))
 
 
-def safe_path(path: str | Path, workdir: str | Path | None = None) -> Path:
-    """Resolve a path under the workspace and reject traversal/symlink escape."""
+def safe_path(
+    path: str | Path,
+    workdir: str | Path | None = None,
+    *,
+    allow_workspace_escape: bool = False,
+) -> Path:
+    """Resolve a path, fencing it to the workspace unless explicitly allowed."""
 
     if not isinstance(path, (str, Path)):
         raise ValueError("path must be a string")
     root = _workspace(workdir)
     candidate = (root / path).resolve()
-    if not candidate.is_relative_to(root):
+    if not allow_workspace_escape and not candidate.is_relative_to(root):
         raise ValueError(f"Path escapes workspace: {path}")
     return candidate
 
@@ -101,7 +106,13 @@ def run_bash(
         return _truncate(f"Error: {exc}")
 
 
-def run_read(path: str | Path, limit: int | None = None, workdir: str | Path | None = None) -> str:
+def run_read(
+    path: str | Path,
+    limit: int | None = None,
+    workdir: str | Path | None = None,
+    *,
+    allow_workspace_escape: bool = False,
+) -> str:
     try:
         if not isinstance(path, (str, Path)):
             return "Error: Invalid path: expected a string"
@@ -114,7 +125,7 @@ def run_read(path: str | Path, limit: int | None = None, workdir: str | Path | N
                 workdir, limit = limit, workdir
         if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
             return "Error: limit must be a positive integer"
-        lines = safe_path(path, workdir).read_text(encoding="utf-8").splitlines()
+        lines = safe_path(path, workdir, allow_workspace_escape=allow_workspace_escape).read_text(encoding="utf-8").splitlines()
         if limit is not None:
             if limit < len(lines):
                 lines = lines[:limit] + [f"... ({len(lines) - limit} more lines)"]
@@ -123,13 +134,18 @@ def run_read(path: str | Path, limit: int | None = None, workdir: str | Path | N
         return _truncate(f"Error: {exc}")
 
 
-def run_read_image(path: str | Path, workdir: str | Path | None = None) -> ImageAttachment | str:
+def run_read_image(
+    path: str | Path,
+    workdir: str | Path | None = None,
+    *,
+    allow_workspace_escape: bool = False,
+) -> ImageAttachment | str:
     """Load one local web image for the model's next visual context."""
 
     try:
         if not isinstance(path, (str, Path)):
             return "Error: Invalid path: expected a string"
-        target = safe_path(path, workdir)
+        target = safe_path(path, workdir, allow_workspace_escape=allow_workspace_escape)
         attachment, reason = inspect_local_image(target)
         if attachment is None:
             return _truncate(f"Error: Unable to read image {path}: {reason}")
@@ -138,11 +154,17 @@ def run_read_image(path: str | Path, workdir: str | Path | None = None) -> Image
         return _truncate(f"Error: {exc}")
 
 
-def run_write(path: str | Path, content: str, workdir: str | Path | None = None) -> str:
+def run_write(
+    path: str | Path,
+    content: str,
+    workdir: str | Path | None = None,
+    *,
+    allow_workspace_escape: bool = False,
+) -> str:
     try:
         if not isinstance(path, (str, Path)) or not isinstance(content, str):
             return "Error: Invalid arguments: path and content must be strings"
-        target = safe_path(path, workdir)
+        target = safe_path(path, workdir, allow_workspace_escape=allow_workspace_escape)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         return _truncate(f"Wrote {len(content.encode('utf-8'))} bytes to {path}")
@@ -150,11 +172,18 @@ def run_write(path: str | Path, content: str, workdir: str | Path | None = None)
         return _truncate(f"Error: {exc}")
 
 
-def run_edit(path: str | Path, old_text: str, new_text: str, workdir: str | Path | None = None) -> str:
+def run_edit(
+    path: str | Path,
+    old_text: str,
+    new_text: str,
+    workdir: str | Path | None = None,
+    *,
+    allow_workspace_escape: bool = False,
+) -> str:
     try:
         if not isinstance(path, (str, Path)) or not isinstance(old_text, str) or not isinstance(new_text, str):
             return "Error: Invalid arguments: path, old_text, and new_text must be strings"
-        target = safe_path(path, workdir)
+        target = safe_path(path, workdir, allow_workspace_escape=allow_workspace_escape)
         content = target.read_text(encoding="utf-8")
         if old_text not in content:
             return _truncate(f"Error: Text not found in {path}")
@@ -221,6 +250,7 @@ def dispatch_tool(
     workdir: str | Path | None = None,
     *,
     bash_timeout_s: float | None = None,
+    allow_workspace_escape: bool = False,
 ) -> str | ImageAttachment:
     """Dispatch one decoded call and turn every handler failure into text."""
 
@@ -243,6 +273,8 @@ def dispatch_tool(
                 f"Error: Invalid arguments for {name}: unexpected {', '.join(sorted(extra))}"
             )
         values["workdir"] = workdir
+        if name in {"read_file", "write_file", "edit_file", "read_image"}:
+            values["allow_workspace_escape"] = allow_workspace_escape
         if name == "bash" and bash_timeout_s is not None:
             values["timeout_s"] = bash_timeout_s
         result = spec["handler"](**values)

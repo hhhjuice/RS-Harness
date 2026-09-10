@@ -46,7 +46,7 @@ v0.1.0 注册六个通用工作区工具；模型可以在预算范围内多次�
 以下功能只保留清晰的扩展边界，不在 v0.1.0 实现：
 
 - MCP 服务发现、遥感元数据/预览/波段处理、算法推理和后处理。
-- Hooks、插件系统、权限审批和人工介入。
+- 插件系统和人工介入之外，当前版本已提供 Hooks 与权限审批扩展点。
 - 上下文压缩、摘要、外部记忆或向量数据库；ledger 永久保留完整消息。
 - 多 Agent、任务分解、并行执行、后台任务、流式输出和 Web 服务。
 - 解码遥感栅格（GeoTIFF 等）的像素或地理信息；web 格式图片（JPEG/PNG/WebP/GIF ≤ 32MB）以 OpenAI `image_url` 视觉输入直传模型，影像字节永不写入轨迹。
@@ -221,7 +221,7 @@ SDK 初始化或首次调用失败必须返回明确错误；不能切换到 Stu
 
 - `AgentLoop`：状态迁移、轮次/预算检查、OpenAI SDK 调用和终态保证；不导入遥感库。
 - `Config`：读取 Config 文件并加载 `.env`，校验模型和预算，生成只读配置快照。
-- `MessageLedger`：将完整 provider message 追加写入 `messages.jsonl`，仅附带序号和时间戳元数据；不生成自定义模型调用事件。
+- `MessageLedger`：将完整 provider message 追加写入 `messages.jsonl`，仅附带序号和时间戳元数据。Hook 生命周期事件独立写入 `events.jsonl`。
 - `Session`：通过 `create` / `open` 持久化模型上下文，保存 `session.json`、`messages.jsonl`；`close` 只更新终态并返回内存中的 `SessionResult`；`list` 按时间顺序返回 sessions 目录下全部可解析的 session 状态。
 - `CLI`：`uv run rsh` 默认进入交互循环，支持 `/help`、`/status`、`/close`、`/quit`、`/exit`；同时提供 `create-session`、`ask`、`close-session` 和 `list-session` 脚本入口。交互入口及脚本入口支持 `--workdir`，恢复会话时默认沿用其保存的目录。
 
@@ -326,7 +326,7 @@ Config 或真实模型不可用时，CLI 使用非零退出码并输出可读错
 - **不可恢复的历史工具调用**：`failed/unmatched_tool_call`，提示新建 session，不重放历史副作用。
 - **空文本**：`failed/empty_model_response`。
 - **预算**：默认最多 20 次模型调用、单次 60 秒、最多 4096 输出 token，单个 bash 工具调用默认 120 秒（`[loop] bash_timeout_s`，超时终止整个进程组）；最后一轮的工具结果写入后，超出上限返回 `failed/budget_exceeded`。v0.1.0 不自动重试，避免重复计费和隐藏延迟。
-- **日志**：所有实际发送或接收的 message 追加到 `messages.jsonl`，不写入自定义模型调用事件。循环本身不打印；CLI 通过注入的日志回调在 stdout 输出工具名和结果前 200 个字符（终端为彩色，管道/重定向为纯文本）。使用 `--json` 且发生工具调用时，日志会出现在 JSON payload 之前。
+- **日志与 Hooks**：所有实际发送或接收的 message 追加到 `messages.jsonl`，Hook 生命周期事件追加到 `events.jsonl`（参数与输出脱敏、截断后写入）。循环本身不打印；CLI 通过注入的 console 回调在 stdout 输出 Hook 通知（提示提交时的工作目录、每次工具调用前的参数预览、Stop 摘要；终端为彩色，管道/重定向为纯文本）。使用 `--json` 且发生工具调用时，通知会出现在 JSON payload 之前。
 - **机密**：API key、Authorization header、完整 Config 密钥字段和影像内容不得进入日志或状态快照；工具观察（如 `env` 输出）在写入 ledger、回传模型和输出日志前统一按 `api_key_env` 对应值脱敏为 `[REDACTED]`。
 
 ## 11. 测试与验收标准
@@ -341,7 +341,7 @@ Config 或真实模型不可用时，CLI 使用非零退出码并输出可读错
 8. 工具调用、结果回填和连续模型调用按调用 ID 保持完整；达到 `max_turns` 时不留下未配对调用。
 9. OpenAI SDK 通过真实服务或受控 SDK transport contract test 验证原生响应提取和 session 记录。
 10. 生产 CLI 不存在 Stub/offline 开关；非敏感基础设置来自 Config 文件，API Key 等敏感值来自 `.env` 或进程环境。
-11. 交互入口的 `/quit` 和 `/exit` 都能保留运行中的 Session；CLI 通过日志回调向 stdout 输出工具名及结果前 200 个字符（含密钥时已脱敏），循环自身保持静默，readline 不可用时仍可启动。
+11. 交互入口的 `/quit` 和 `/exit` 都能保留运行中的 Session；CLI 通过 console 回调向 stdout 输出 Hook 通知（工作目录、工具调用参数预览、Stop 摘要，含密钥时已脱敏），循环自身保持静默，readline 不可用时仍可启动。
 
 ## 12. 后续演进顺序
 
@@ -351,6 +351,6 @@ Config 或真实模型不可用时，CLI 使用非零退出码并输出可读错
 2. 影像感知：通过 MCP 获取遥感栅格的元数据、质量和预览事实（生成可直读预览后进入现有视觉输入通道），再支持遥感 query + image 问答。
 3. Skills 按需加载和可控的系统知识注入。
 4. 上下文窗口管理、摘要/压缩、可恢复运行和资源监控。
-5. Hooks、权限审批、记忆、多 Agent 以及仅影像探索模式；探索模式必须让所有 MCP 遥感能力形成明确终态并生成报告。
+5. 记忆、多 Agent 以及仅影像探索模式；探索模式必须让所有 MCP 遥感能力形成明确终态并生成报告。
 
 每次扩展都要继续遵守：模型负责观察和决策，Harness 负责稳定执行；遥感处理只经过 MCP；工具失败不被静默吞掉；最终回答只引用已确认的观察和产物。

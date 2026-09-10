@@ -12,6 +12,7 @@ import typer
 from .agent_loop import InputRequest, close_session, create_session, run
 from .config import Config, ConfigError
 from .runtime.session import Session, SessionState
+from .runtime.hooks import PermissionRequest
 
 
 def _configure_readline() -> None:
@@ -58,7 +59,10 @@ def _ask_impl(
         except Exception as exc:
             _print_error("runtime_error", f"Unable to create session: {exc}", as_json=as_json)
             return 1
-    result = run(session_id, request, loaded_config, tool_log=_cli_tool_log, workdir=workdir)
+    result = run(
+        session_id, request, loaded_config, console=_cli_console,
+        permission_callback=_cli_permission_callback, workdir=workdir,
+    )
     if as_json:
         _echo(result.model_dump_json(indent=2))
         return {"succeeded": 0, "not_supported": 2, "failed": 1}[result.status]
@@ -230,14 +234,26 @@ def _format_session_history(messages: list[dict[str, object]]) -> str:
     return "\n".join(entries)
 
 
-def _cli_tool_log(name: str, preview: str) -> None:
-    # Tool logs share stdout with the answer/JSON payload; keep escape codes
-    # out of pipes and redirected output.
+def _cli_console(message: str) -> None:
+    # Hook notices share stdout with the answer/JSON payload; keep escape
+    # codes out of pipes and redirected output.
     if sys.stdout.isatty():
-        print(f"\033[33m> {name}\033[0m")
+        print(f"\033[90m{message}\033[0m")
     else:
-        print(f"> {name}")
-    print(preview)
+        print(message)
+
+
+def _cli_permission_callback(request: PermissionRequest) -> bool:
+    _echo(f"[permission] {request.reason}: {request.tool_name}({request.arguments})", err=True)
+    # input(prompt) 会把 prompt 写到 stdout；--json 模式下 stdout 只允许
+    # 出现结果 payload，因此审批提问必须走 stderr。
+    sys.stderr.write("Allow? [y/N] ")
+    sys.stderr.flush()
+    try:
+        choice = input().strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return choice in ("y", "yes")
 
 
 def _interactive_impl(
@@ -298,7 +314,10 @@ def _interactive_impl(
             _echo(f"Unknown command: {text}", err=True)
             continue
 
-        result = run(session_id, InputRequest(query=text), config, tool_log=_cli_tool_log, workdir=workdir)
+        result = run(
+            session_id, InputRequest(query=text), config, console=_cli_console,
+            permission_callback=_cli_permission_callback, workdir=workdir,
+        )
         if result.status == "succeeded":
             _echo(result.answer or "")
         elif result.status == "not_supported":

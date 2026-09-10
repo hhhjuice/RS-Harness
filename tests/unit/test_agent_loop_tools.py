@@ -74,14 +74,14 @@ def test_tool_calls_are_executed_returned_by_id_and_loop_continues(tmp_path: Pat
         ]
     )
     session = create_session(config, workdir=workspace)
-    events: list[tuple[str, str]] = []
+    notices: list[str] = []
 
     result = run(
         session.state.session_id,
         InputRequest(query="do it"),
         config,
         openai_sdk_client=client,
-        tool_log=lambda name, preview: events.append((name, preview)),
+        console=lambda message: notices.append(message),
     )
 
     assert result.status == "succeeded"
@@ -97,9 +97,11 @@ def test_tool_calls_are_executed_returned_by_id_and_loop_continues(tmp_path: Pat
         "read-1",
     ]
     assert (workspace / "a.txt").read_text(encoding="utf-8") == "hello"
-    assert events == [
-        ("write_file", "Wrote 5 bytes to a.txt"),
-        ("read_file", "hello"),
+    assert notices == [
+        f"[HOOK] UserPromptSubmit: working in {workspace.resolve()}",
+        "[HOOK] write_file(['a.txt', 'hello'])",
+        "[HOOK] read_file(['a.txt'])",
+        "[HOOK] Stop: session used 2 tool calls",
     ]
 
 
@@ -119,14 +121,14 @@ def test_tool_errors_and_invalid_json_are_observations_then_model_can_recover(tm
         ]
     )
     session = create_session(config, workdir=workspace)
-    events: list[tuple[str, str]] = []
+    notices: list[str] = []
 
     result = run(
         session.state.session_id,
         {"query": "recover"},
         config,
         openai_sdk_client=client,
-        tool_log=lambda name, preview: events.append((name, preview)),
+        console=lambda message: notices.append(message),
     )
 
     assert result.status == "succeeded"
@@ -138,38 +140,39 @@ def test_tool_errors_and_invalid_json_are_observations_then_model_can_recover(tm
         "tool_call_id": "unknown",
         "content": "Unknown tool: missing_tool",
     }
-    assert [name for name, _ in events] == ["read_file", "missing_tool"]
-    assert events[0][1].startswith("Error: Invalid JSON arguments")
-    assert events[1][1] == "Unknown tool: missing_tool"
+    # An undecodable call has no arguments to preview, so only the valid
+    # invocation is logged.
+    assert "[HOOK] missing_tool([])" in notices
+    assert not any("read_file(" in notice for notice in notices)
 
 
-def test_tool_log_contains_only_first_200_result_characters(tmp_path: Path, monkeypatch):
+def test_console_previews_only_first_60_argument_characters(tmp_path: Path, monkeypatch):
     config = _config(tmp_path)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(agent_loop_module, "dispatch_tool", lambda *args, **kwargs: "x" * 250)
     client = SequenceClient(
         [
-            _response(calls=[_call("long", "glob", '{"pattern":"*"}')]),
+            _response(calls=[_call("long", "glob", '{"pattern":"' + "x" * 100 + '"}')]),
             _response("done"),
         ]
     )
     session = create_session(config, workdir=workspace)
-    events: list[tuple[str, str]] = []
+    notices: list[str] = []
 
     result = run(
         session.state.session_id,
         {"query": "find"},
         config,
         openai_sdk_client=client,
-        tool_log=lambda name, preview: events.append((name, preview)),
+        console=lambda message: notices.append(message),
     )
 
     assert result.status == "succeeded"
-    assert events == [("glob", "x" * 200)]
+    assert notices[1] == f"[HOOK] glob({str(['x' * 100])[:60]})"
+    assert len(notices[1]) <= 60 + len("[HOOK] glob()")
 
 
-def test_tool_log_is_silent_by_default(tmp_path: Path, capsys):
+def test_console_is_silent_by_default(tmp_path: Path, capsys):
     config = _config(tmp_path)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -206,18 +209,18 @@ def test_tool_output_secrets_are_redacted_in_log_ledger_and_model_request(
         ]
     )
     session = create_session(config, workdir=workspace)
-    events: list[tuple[str, str]] = []
+    notices: list[str] = []
 
     result = run(
         session.state.session_id,
         {"query": "show env"},
         config,
         openai_sdk_client=client,
-        tool_log=lambda name, preview: events.append((name, preview)),
+        console=lambda message: notices.append(message),
     )
 
     assert result.status == "succeeded"
-    assert events == [("bash", "OPENAI_API_KEY=[REDACTED]")]
+    assert "[HOOK] bash(['env'])" in notices
     sent_tool_messages = [
         message
         for message in client.calls[1]["messages"]
@@ -270,14 +273,14 @@ def test_read_image_tool_attaches_image_after_tool_results(tmp_path: Path):
         ]
     )
     session = create_session(config, workdir=workspace)
-    events: list[tuple[str, str]] = []
+    notices: list[str] = []
 
     result = run(
         session.state.session_id,
         {"query": "看看这个 jpg 图片有什么内容"},
         config,
         openai_sdk_client=client,
-        tool_log=lambda name, preview: events.append((name, preview)),
+        console=lambda message: notices.append(message),
     )
 
     assert result.status == "succeeded"
@@ -301,8 +304,7 @@ def test_read_image_tool_attaches_image_after_tool_results(tmp_path: Path):
             "url": "data:image/jpeg;base64," + base64.b64encode(JPEG).decode("ascii")
         },
     }
-    assert events[0][0] == "read_image"
-    assert events[0][1].startswith("Image loaded:")
+    assert "[HOOK] read_image(['photo.jpg'])" in notices
 
     ledger = (session.path / "messages.jsonl").read_text(encoding="utf-8")
     assert "image_ref" in ledger

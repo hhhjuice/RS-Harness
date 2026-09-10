@@ -5,6 +5,8 @@ __version__ = "0.1.0"
 from .agent_loop import AgentLoop, InputRequest, close_session, create_session, run
 from .config import Config, ConfigError, LoopConfig, ModelConfig, RuntimeConfig
 from .runtime.session import ErrorInfo, InteractionResult, SessionResult, SessionState, SessionStatus
+from .runtime.trace import EventLedger
+from .runtime.hooks import HookContext, HookDecision, HookEvent, HookRegistry, PermissionCallback, PermissionRequest, check_permission, default_hooks, log_hook, tool_error_hook
 from .runtime.tools import (
     TOOLS,
     TOOL_HANDLERS,
@@ -46,5 +48,16 @@ __all__ = [
     "run_edit",
     "run_glob",
     "run_read_image",
+    "HookContext",
+    "HookDecision",
+    "HookEvent",
+    "HookRegistry",
+    "PermissionCallback",
+    "PermissionRequest",
+    "check_permission",
+    "default_hooks",
+    "log_hook",
+    "tool_error_hook",
+    "EventLedger",
     "__version__",
 ]

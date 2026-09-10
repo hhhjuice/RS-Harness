@@ -1,5 +1,5 @@
 [model]
-model = "deepseek-v4-flash-vision-exp"
+model = "deepseek-flash"
 base_url = "https://api.deepseek.com"                          # empty uses the SDK default endpoint
 api_key_env = "OPENAI_API_KEY"
 timeout_s = 60

@@ -34,12 +34,14 @@ Set `model`, `base_url`, and `api_key_env` in a Config file (see
 `config/example.toml`). The default config uses `deepseek-v4-flash-vision-exp`
 at `https://api.deepseek.com` and reads the provider key from
 `OPENAI_API_KEY`. Use `--json` to print the session result. When a request
-invokes tools, the tool log lines are written to stdout before the JSON payload.
+invokes tools, the hook notice lines are written to stdout before the JSON
+payload.
 The system prompt is configurable through `system_prompt_file` under
 `[runtime]`; it must contain `{workdir}` and is rendered with the session's
 fixed directory when the session is created. File creation, modification, and
 editing are restricted to that directory, and a session cannot be resumed with
-a different workdir.
+a different workdir. File-tool paths stay inside that directory unless a
+permission callback explicitly approves a single workspace escape.
 
 Each session writes the following files under `sessions/<session_id>/`:
 
@@ -47,10 +49,13 @@ Each session writes the following files under `sessions/<session_id>/`:
   absolute tool workspace.
 * `messages.jsonl` — append-only, complete message ledger. Each record carries
   a sequence number, timestamp, and the provider message payload.
+* `events.jsonl` — append-only lifecycle audit for UserPromptSubmit, PreToolUse,
+  PostToolUse, and Stop Hooks. Arguments and outputs are redacted and truncated
+  before they are written.
 
 The loop exposes six workspace tools to the model: `bash`, `read_file`,
 `write_file`, `edit_file`, `glob`, and `read_image`. File-tool paths and glob matches stay
-inside the session workspace; tool failures are returned to the model as
+inside the session workspace by default; tool failures are returned to the model as
 observations so it can recover. Tool observations are redacted against the
 configured API key before they reach the ledger, the model, or any log.
 
@@ -79,15 +84,36 @@ to obtain its generated `session_id`. Empty query and image input exits
 quietly; a closed session rejects further asks. A session with an incomplete
 historical tool call must be replaced rather than replaying the old action.
 
-The v0.1.0 loop provides `bash`, `read_file`, `write_file`, `edit_file`, `glob`,
+The loop provides `bash`, `read_file`, `write_file`, `edit_file`, `glob`,
 and `read_image` for general workspace tasks, plus vision input for web-format images.
-MCP, Hooks, memory, context management, streaming, and remote-sensing raster
-processing remain out of scope; remote-sensing semantics stay
-behind the MCP boundary. Use `--workdir` to select the workspace for a session;
+Remote-sensing semantics stay behind the MCP boundary. Use `--workdir` to select the workspace for a session;
 it may be placed before or after a subcommand, and the subcommand value takes
 precedence.
 
-Tool execution is silent inside the loop; the CLI injects a log callback that
-prints the tool name and the first 200 characters of its result to stdout —
-colored on a terminal, plain text when piped — matching the reference
-interactive client.
+Tool execution is silent inside the loop; the CLI injects a console callback
+that prints hook notices to stdout — the working directory at prompt submit,
+each tool invocation with a short argument preview before execution, and a
+tool-call summary at stop — colored on a terminal, plain text when piped,
+matching the reference interactive client.
+
+Hooks run at four lifecycle points. `UserPromptSubmit` records the incoming
+request, `PreToolUse` runs `check_permission` and previews the invocation,
+and `PostToolUse` normalizes errors and flags outputs over 100,000 characters;
+`Stop` records a summary for every interaction termination. Risky commands and
+file paths outside the session workspace require a `permission_callback`; without
+one they are denied. Hard-deny Bash patterns cannot be approved. An approved
+workspace escape applies only to that single file-tool call; the default
+`safe_path` fence remains active.
+
+Library callers can register additional callbacks with `HookRegistry` and pass
+it to `run(..., hooks=registry)`. The CLI supplies an interactive approval
+callback; API callers can provide their own callback or rely on the safe default.
+
+| Event | Timing | Default behavior |
+| --- | --- | --- |
+| `UserPromptSubmit` | Before the user message is appended | Records request context |
+| `PreToolUse` | After argument decoding, before dispatch | Checks permission, previews invocation |
+| `PostToolUse` | After execution or skipped result | Normalizes errors and records large-output metadata |
+| `Stop` | Once on every interaction termination | Records status and tool-call count |
+
+这是一个好项目

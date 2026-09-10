@@ -81,7 +81,7 @@ def test_ask_without_session_id_creates_one(monkeypatch, tmp_path: Path, capsys)
     monkeypatch.setattr(cli, "run", fake_run)
     assert cli._ask_impl("hello", None, None, tmp_path / "config.toml", False) == 0
     assert seen["session_id"] == "generated"
-    assert seen["run_kwargs"]["tool_log"] is cli._cli_tool_log
+    assert seen["run_kwargs"]["console"] is cli._cli_console
     assert capsys.readouterr().out.strip() == "ok"
 
 
@@ -120,13 +120,28 @@ def test_ask_passes_explicit_workdir_to_session_and_loop(monkeypatch, tmp_path: 
     assert cli._ask_impl("hello", None, None, tmp_path / "config.toml", False, workdir) == 0
     assert seen["create"]["workdir"] == workdir
     assert seen["run"]["workdir"] == workdir
-    assert seen["run"]["tool_log"] is cli._cli_tool_log
+    assert seen["run"]["console"] is cli._cli_console
 
 
-def test_cli_tool_log_is_plain_without_tty(capsys):
-    cli._cli_tool_log("bash", "output preview")
+def test_cli_console_is_plain_without_tty(capsys):
+    cli._cli_console("working in /tmp")
 
-    assert capsys.readouterr().out == "> bash\noutput preview\n"
+    assert capsys.readouterr().out == "working in /tmp\n"
+
+
+def test_permission_prompt_stays_off_stdout(monkeypatch, capsys):
+    monkeypatch.setattr(builtins, "input", lambda prompt="": "y")
+    request = cli.PermissionRequest(
+        tool_name="bash", arguments={"command": "rm file"},
+        reason="Potentially destructive command", workdir="/tmp",
+    )
+
+    assert cli._cli_permission_callback(request) is True
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Allow? [y/N]" in captured.err
+    assert "[permission]" in captured.err
 
 
 def test_list_sessions_impl_prints_summaries_as_json_array(monkeypatch, tmp_path: Path, capsys):
@@ -185,7 +200,7 @@ def test_interactive_creates_session_and_reuses_it_for_multiple_inputs(monkeypat
         ("generated", "first question"),
         ("generated", "second question"),
     ]
-    assert all(kwargs["tool_log"] is cli._cli_tool_log for *_, kwargs in run_calls)
+    assert all(kwargs["console"] is cli._cli_console for *_, kwargs in run_calls)
     output = capsys.readouterr().out
     assert "rsh session generated" in output
     assert "answer: first question" in output

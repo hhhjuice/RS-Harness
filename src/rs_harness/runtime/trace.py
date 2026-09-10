@@ -108,3 +108,40 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return repr(value)
+
+
+class EventLedger:
+    """Append-only structured lifecycle events for one session."""
+
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._next_seq = self._read_next_seq()
+
+    def _read_next_seq(self) -> int:
+        if not self.path.exists():
+            return 1
+        next_seq = 1
+        with self.path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    next_seq = max(next_seq, int(json.loads(line)["seq"]) + 1)
+                except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+                    continue
+        return next_seq
+
+    def append(self, event: Mapping[str, Any]) -> int:
+        seq = self._next_seq
+        record = {"seq": seq, "timestamp": utc_now(), **_json_safe(dict(event))}
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        self._next_seq += 1
+        return seq
+
+    def records(self) -> list[dict[str, Any]]:
+        if not self.path.exists():
+            return []
+        with self.path.open("r", encoding="utf-8") as handle:
+            return [json.loads(line) for line in handle if line.strip()]

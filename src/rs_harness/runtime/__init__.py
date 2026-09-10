@@ -1,7 +1,19 @@
 """Runtime state and persistent message contexts."""
 
 from .session import ErrorInfo, InteractionResult, Session, SessionResult, SessionState
-from .trace import MessageLedger
+from .trace import EventLedger, MessageLedger
+from .hooks import (
+    HookContext,
+    HookDecision,
+    HookEvent,
+    HookRegistry,
+    PermissionCallback,
+    PermissionRequest,
+    check_permission,
+    default_hooks,
+    log_hook,
+    tool_error_hook,
+)
 from .tools import (
     TOOLS,
     TOOL_HANDLERS,
@@ -20,9 +32,20 @@ __all__ = [
     "ErrorInfo",
     "InteractionResult",
     "MessageLedger",
+    "EventLedger",
     "Session",
     "SessionResult",
     "SessionState",
+    "HookContext",
+    "HookDecision",
+    "HookEvent",
+    "HookRegistry",
+    "PermissionCallback",
+    "PermissionRequest",
+    "check_permission",
+    "default_hooks",
+    "log_hook",
+    "tool_error_hook",
     "TOOLS",
     "TOOL_HANDLERS",
     "dispatch_tool",

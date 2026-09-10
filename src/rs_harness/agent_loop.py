@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 from .config import Config, ConfigError
 from .runtime.images import ImageAttachment
+from .runtime.hooks import HookContext, HookDecision, HookEvent, HookRegistry, PermissionCallback, PermissionRequest, default_hooks
 from .runtime.messages import (
     assistant_turn,
     build_user_message_content,
@@ -35,6 +36,12 @@ __all__ = [
     "run",
     "create_session",
     "close_session",
+    "HookContext",
+    "HookDecision",
+    "HookEvent",
+    "HookRegistry",
+    "PermissionCallback",
+    "PermissionRequest",
 ]
 
 
@@ -66,9 +73,13 @@ class AgentLoop:
         config: Config,
         *,
         openai_sdk_client: Any | None = None,
+        hooks: HookRegistry | None = None,
+        permission_callback: PermissionCallback | None = None,
     ):
         self.config = config
         self.openai_sdk_client = openai_sdk_client
+        self.hooks = hooks
+        self.permission_callback = permission_callback
 
     def run(
         self,
@@ -76,7 +87,9 @@ class AgentLoop:
         request: InputRequest | Mapping[str, Any],
         *,
         workdir: str | Path | None = None,
-        tool_log: Callable[[str, str], None] | None = None,
+        console: Callable[[str], None] | None = None,
+        hooks: HookRegistry | None = None,
+        permission_callback: PermissionCallback | None = None,
     ) -> InteractionResult:
         return run(
             session_id,
@@ -84,7 +97,9 @@ class AgentLoop:
             self.config,
             openai_sdk_client=self.openai_sdk_client,
             workdir=workdir,
-            tool_log=tool_log,
+            console=console,
+            hooks=hooks or self.hooks,
+            permission_callback=permission_callback or self.permission_callback,
         )
 
 
@@ -115,12 +130,15 @@ def run(
     *,
     openai_sdk_client: Any | None = None,
     workdir: str | Path | None = None,
-    tool_log: Callable[[str, str], None] | None = None,
+    console: Callable[[str], None] | None = None,
+    hooks: HookRegistry | None = None,
+    permission_callback: PermissionCallback | None = None,
 ) -> InteractionResult:
     """Append one interaction to an existing session and run the model.
 
-    ``tool_log(name, preview)`` receives each tool call name and the first 200
-    characters of its (already redacted) result; the loop itself stays silent.
+    ``console(message)`` receives one ``[HOOK]``-prefixed line per user-facing
+    hook notice (working directory, tool invocations, session summary); the
+    loop itself stays silent.
     """
 
     try:
@@ -142,26 +160,47 @@ def run(
         return _interaction_failure(session_id, "runtime_error", str(exc), 0)
 
     with session.locked():
+        registry = default_hooks(
+            permission_callback=permission_callback,
+            console=console,
+            event_sink=session.append_event,
+            redactor=lambda value: _redact_secrets(value, config),
+            custom=hooks,
+        )
+        result: InteractionResult | None = None
         try:
-            return _interact(
+            result = _interact(
                 session,
                 normalized,
                 image_reference,
                 config,
                 openai_sdk_client=openai_sdk_client,
                 workdir=workdir,
-                tool_log=tool_log,
+                hooks=registry,
             )
+            return result
         except _LoopFailure as failure:
             if failure.record:
                 session.add_error(ErrorInfo(code=failure.code, message=failure.message))
-            return _interaction_failure(
+            result = _interaction_failure(
                 session_id,
                 failure.code,
                 failure.message,
                 failure.turn,
                 session_status=failure.session_status,
             )
+            return result
+        finally:
+            # Success exits already ran Stop inside the turn loop, where its
+            # force-continue result can extend the loop; every other exit is
+            # reported here exactly once.
+            if result is None or result.status != "succeeded":
+                registry.trigger(HookContext(
+                    event="Stop", session=session, session_id=session.state.session_id,
+                    turn=session.state.turn, query=normalized.query,
+                    workdir=session.state.workdir or "",
+                    metadata={"status": result.status if result is not None else "failed"},
+                ))
 
 
 def _interact(
@@ -172,7 +211,7 @@ def _interact(
     *,
     openai_sdk_client: Any | None,
     workdir: str | Path | None,
-    tool_log: Callable[[str, str], None] | None,
+    hooks: HookRegistry,
 ) -> InteractionResult:
     if session.state.status != "running":
         raise _LoopFailure(
@@ -215,6 +254,10 @@ def _interact(
         )
 
     if normalized.query is None:
+        hooks.trigger(HookContext(
+            event="UserPromptSubmit", session=session, session_id=session.state.session_id,
+            turn=session.state.turn, query=normalized.query, workdir=effective_workdir,
+        ))
         try:
             session.append(
                 {
@@ -236,6 +279,10 @@ def _interact(
             turn=session.state.turn,
         )
 
+    hooks.trigger(HookContext(
+        event="UserPromptSubmit", session=session, session_id=session.state.session_id,
+        turn=session.state.turn, query=normalized.query, workdir=effective_workdir,
+    ))
     try:
         if session.state.query is None:
             session.state.query = normalized.query
@@ -269,7 +316,10 @@ def _interact(
     except Exception as exc:
         raise _LoopFailure("runtime_error", str(exc), turn=session.state.turn)
 
-    return _drive_turns(session, config, client, workdir=effective_workdir, tool_log=tool_log)
+    return _drive_turns(
+        session, config, client, workdir=effective_workdir, hooks=hooks,
+        query=normalized.query,
+    )
 
 
 def _drive_turns(
@@ -278,7 +328,8 @@ def _drive_turns(
     client: Any,
     *,
     workdir: str,
-    tool_log: Callable[[str, str], None] | None,
+    hooks: HookRegistry,
+    query: str | None = None,
 ) -> InteractionResult:
     session_id = session.state.session_id
     messages = session.ledger.messages()
@@ -316,10 +367,22 @@ def _drive_turns(
             )
 
         if tool_calls:
-            _execute_tool_calls(session, messages, tool_calls, workdir, config, tool_log)
+            _execute_tool_calls(session, messages, tool_calls, workdir, config, hooks)
             continue
 
         if answer.strip():
+            force = hooks.trigger(HookContext(
+                event="Stop", session=session, session_id=session_id,
+                turn=turn, query=query, workdir=workdir,
+                metadata={"status": "succeeded"},
+            ))
+            if force:
+                # A Stop hook demanded more work; its message continues the
+                # same interaction as a user turn.
+                continuation = {"role": "user", "content": force}
+                session.append(continuation)
+                messages.append(continuation)
+                continue
             return InteractionResult(
                 session_id=session_id,
                 status="succeeded",
@@ -345,20 +408,39 @@ def _execute_tool_calls(
     tool_calls: list[tuple[str, str, Any]],
     workdir: str,
     config: Config,
-    tool_log: Callable[[str, str], None] | None,
+    hooks: HookRegistry,
 ) -> None:
     image_attachments: list[ImageAttachment] = []
     for tool_id, tool_name, raw_arguments in tool_calls:
         arguments, argument_error = decode_tool_arguments(raw_arguments)
         if argument_error is not None:
             output = argument_error
+            decision = None
         else:
+            context = HookContext(
+                event="PreToolUse", session=session, session_id=session.state.session_id,
+                turn=session.state.turn, workdir=workdir, tool_call_id=tool_id,
+                tool_name=tool_name, arguments=arguments,
+            )
+            decision = hooks.trigger(context)
+            if decision is not None and not decision.allowed:
+                output = decision.reason or "Permission denied"
+                post_context = HookContext(
+                    event="PostToolUse", session=session, session_id=session.state.session_id,
+                    turn=session.state.turn, workdir=workdir, tool_call_id=tool_id,
+                    tool_name=tool_name, arguments=arguments, output=output,
+                    metadata={"skipped": True, "permission_denied": True},
+                )
+                hooks.trigger(post_context)
+                _append_tool_observation(session, messages, tool_id, post_context.output or output)
+                continue
             try:
                 raw_output = dispatch_tool(
                     tool_name,
                     arguments,
                     workdir,
                     bash_timeout_s=config.loop.bash_timeout_s,
+                    allow_workspace_escape=bool(decision and decision.allow_workspace_escape),
                 )
                 if isinstance(raw_output, ImageAttachment):
                     image_attachments.append(raw_output)
@@ -369,20 +451,21 @@ def _execute_tool_calls(
                 else:
                     output = str(raw_output)
             except Exception as exc:  # defensive: a tool must never break the loop
-                output = f"Error: Tool execution failed: {exc}"
-        # A tool observation (e.g. ``env`` output) can echo the API
-        # key; redact before the value reaches the log, the ledger,
-        # or the next model request.
-        output = _redact_secrets(str(output), config)
-        if tool_log is not None:
-            tool_log(tool_name, output[:200])
-        tool_message = {
-            "role": "tool",
-            "tool_call_id": tool_id,
-            "content": output,
-        }
-        session.append(tool_message)
-        messages.append(tool_message)
+                output = None
+                tool_error = exc
+            else:
+                tool_error = None
+        # PostToolUse has already normalized and redacted the output before
+        # it reaches the log, the ledger, or the next model request.
+        post_context = HookContext(
+            event="PostToolUse", session=session, session_id=session.state.session_id,
+            turn=session.state.turn, workdir=workdir, tool_call_id=tool_id,
+            tool_name=tool_name, arguments=arguments if argument_error is None else {}, output=output,
+            error=tool_error if argument_error is None else None,
+            metadata={"argument_error": True} if argument_error is not None else {},
+        )
+        hooks.trigger(post_context)
+        _append_tool_observation(session, messages, tool_id, post_context.output or "Error: Tool execution failed")
 
     if image_attachments:
         paths = "\n".join(f"- {attachment.path}" for attachment in image_attachments)
@@ -401,6 +484,12 @@ def _execute_tool_calls(
         }
         session.append(image_message)
         messages.append(image_message)
+
+
+def _append_tool_observation(session: Session, messages: list[dict[str, Any]], tool_id: str, output: str) -> None:
+    tool_message = {"role": "tool", "tool_call_id": tool_id, "content": output}
+    session.append(tool_message)
+    messages.append(tool_message)
 
 
 def _classify_model_exception(exc: Exception) -> str:

@@ -12,7 +12,7 @@ from typing import Any, Iterator, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..config import Config
-from .trace import MessageLedger, _json_safe, utc_now
+from .trace import EventLedger, MessageLedger, _json_safe, utc_now
 from .tools import normalize_workdir
 
 SessionStatus = Literal["running", "closed", "failed"]
@@ -76,6 +76,7 @@ class Session:
         self.state = state
         self.path = path
         self.ledger = MessageLedger(path / "messages.jsonl")
+        self.events = EventLedger(path / "events.jsonl")
         self._lock_path = path / "session.lock"
 
     @classmethod
@@ -162,6 +163,7 @@ class Session:
             (self.path / "session.json").read_text(encoding="utf-8")
         )
         self.ledger = MessageLedger(self.path / "messages.jsonl")
+        self.events = EventLedger(self.path / "events.jsonl")
 
     def save_state(self) -> None:
         _atomic_json_write(self.path / "session.json", self.state.model_dump(mode="json"))
@@ -169,6 +171,10 @@ class Session:
     def append_message(self, message: dict[str, Any]) -> int:
         with self.locked():
             return self.append(message)
+
+    def append_event(self, event: dict[str, Any]) -> int:
+        """Append a structured lifecycle event; caller must hold the lock."""
+        return self.events.append(event)
 
     def append(self, message: dict[str, Any]) -> int:
         """Append one message; the caller must already hold the session lock."""
