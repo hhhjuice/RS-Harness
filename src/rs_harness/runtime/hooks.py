@@ -2,20 +2,17 @@
 
 from __future__ import annotations
 
-import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
+from .redact import Redactor, identity, redact_text, redact_value
 from .todos import is_error_observation
+from .tools import BASH_DENY_LIST, safe_path
 
 HookEvent = Literal["UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"]
 PermissionCallback = Callable[["PermissionRequest"], bool]
-Redactor = Callable[[str], str]
 EventSink = Callable[[dict[str, Any]], object]
-
-
-def _identity(value: str) -> str:
-    return value
 
 
 @dataclass
@@ -32,7 +29,7 @@ class HookContext:
     output: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     error: BaseException | None = None
-    redact: Redactor = field(default=_identity, repr=False)
+    redact: Redactor = field(default=identity, repr=False)
 
 
 @dataclass(frozen=True)
@@ -59,35 +56,6 @@ _SILENT = object()
 # Console prefix for the todo list notice; the CLI matches it for coloring.
 TODO_NOTICE_PREFIX = "[HOOK] ## Current Tasks"
 
-_DATA_URI = re.compile(
-    r"data:[\w.+-]+/[\w.+-]+(?:;[\w=.+-]+)*,[^\s\"'<>]+", re.IGNORECASE
-)
-_CREDENTIAL = re.compile(
-    r"(\b(?:api[_-]?key|authorization|x-api-key|token|secret|password|credentials?)\b\s*[=:]\s*)"
-    r"(\[REDACTED\]|\"[^\"]*\"|'[^']*'|Bearer\s+[^\s,;}\]]+|Basic\s+[^\s,;}\]]+|[^\s,;}\]]+)",
-    re.IGNORECASE,
-)
-
-
-def _sanitize_text(value: str, redact: Redactor) -> str:
-    value = redact(value)
-    value = _DATA_URI.sub("[DATA_URI_REDACTED]", value)
-    return _CREDENTIAL.sub(r"\1[REDACTED]", value)
-
-
-def _sanitize_value(value: Any, redact: Redactor) -> Any:
-    if isinstance(value, str):
-        return _sanitize_text(value, redact)
-    if isinstance(value, BaseException):
-        return {"type": type(value).__name__, "message": _sanitize_text(str(value), redact)}
-    if isinstance(value, dict):
-        return {str(key): _sanitize_value(item, redact) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_sanitize_value(item, redact) for item in value]
-    if isinstance(value, (int, float, bool)) or value is None:
-        return value
-    return _sanitize_text(repr(value), redact)
-
 
 class HookRegistry:
     """Ordered callbacks keyed by lifecycle event."""
@@ -97,7 +65,7 @@ class HookRegistry:
             "UserPromptSubmit": [], "PreToolUse": [], "PostToolUse": [], "Stop": []
         }
         self._event_sink = event_sink
-        self._redactor = redactor or _identity
+        self._redactor = redactor or identity
 
     def register(self, event: HookEvent, callback: HookCallback, *, name: str | None = None) -> None:
         self._hooks[event].append((name or getattr(callback, "__name__", "hook"), callback))
@@ -194,13 +162,12 @@ class HookRegistry:
             if not key.startswith("_") and key != "status":
                 payload[key] = value
         try:
-            self._event_sink(_sanitize_value(payload, context.redact))
+            self._event_sink(redact_value(payload, context.redact))
         except Exception:
             # Audit persistence must never break a model/tool interaction.
             pass
 
 
-DENY_LIST = ("rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "> /dev/")
 DESTRUCTIVE = ("rm ", "> /etc/", "chmod 777")
 
 
@@ -211,12 +178,11 @@ def check_permission(context: HookContext, permission_callback: PermissionCallba
     args = context.arguments
     if name == "bash":
         command = str(args.get("command", ""))
-        for pattern in DENY_LIST:
+        for pattern in BASH_DENY_LIST:
             if pattern in command:
                 return HookDecision(False, f"Blocked: '{pattern}' is on the deny list")
         reason = next(("Potentially destructive command" for pattern in DESTRUCTIVE if pattern in command), None)
     elif name in {"read_file", "write_file", "edit_file", "read_image"}:
-        from .tools import safe_path
         try:
             safe_path(str(args.get("path", "")), context.workdir)
         except ValueError:
@@ -242,7 +208,7 @@ def context_inject_hook(context: HookContext, console: Callable[[str], None] | N
 def tool_error_hook(context: HookContext) -> object:
     if context.error is None or context.output is not None:
         return _SILENT
-    message = _sanitize_text(str(context.error).strip() or type(context.error).__name__, context.redact)
+    message = redact_text(str(context.error).strip() or type(context.error).__name__, context.redact)
     context.output = f"Error: Tool execution failed: {message[:1000]}"
     return None
 
@@ -252,7 +218,7 @@ def log_hook(context: HookContext, console: Callable[[str], None] | None = None)
     if console is None or not context.tool_name:
         return _SILENT
     preview = str(list(context.arguments.values())[:2])[:60]
-    console(f"[HOOK] {context.tool_name}({_sanitize_text(preview, context.redact)})")
+    console(f"[HOOK] {context.tool_name}({redact_text(preview, context.redact)})")
     return _SILENT  # console-only; the check_permission audit already records the call
 
 

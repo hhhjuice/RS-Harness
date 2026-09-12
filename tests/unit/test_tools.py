@@ -72,6 +72,8 @@ def test_read_image_loads_supported_image_and_enforces_workspace(tmp_path: Path)
 def test_bash_runs_in_workspace_and_truncates_output(tmp_path: Path):
     assert run_bash("pwd", tmp_path) == str(tmp_path.resolve())
     assert run_bash("sudo echo blocked", tmp_path) == "Error: Dangerous command blocked"
+    assert run_bash("mkfs /dev/sda1", tmp_path) == "Error: Dangerous command blocked"
+    assert run_bash("dd if=/dev/zero of=/tmp/img", tmp_path) == "Error: Dangerous command blocked"
     output = run_bash(f"\"{sys.executable}\" -c \"print('x' * 60000)\"", tmp_path)
     assert len(output) == 50000
 

@@ -21,6 +21,7 @@ from .runtime.messages import (
     messages_for_model,
     safe_image_reference,
 )
+from .runtime.redact import redact_text, secret_redactor
 from .runtime.session import (
     ErrorInfo,
     InteractionResult,
@@ -31,7 +32,6 @@ from .runtime.tools import TOOLS, dispatch_tool, normalize_workdir
 from .runtime.todos import TodoItem, TodoManager, is_error_observation
 
 __all__ = [
-    "AgentLoop",
     "InputRequest",
     "run",
     "create_session",
@@ -63,44 +63,6 @@ class InputRequest(BaseModel):
 
     def has_input(self) -> bool:
         return self.query is not None or self.image is not None
-
-
-class AgentLoop:
-    """Facade for running interactions against persistent sessions."""
-
-    def __init__(
-        self,
-        config: Config,
-        *,
-        openai_sdk_client: Any | None = None,
-        hooks: HookRegistry | None = None,
-        permission_callback: PermissionCallback | None = None,
-    ):
-        self.config = config
-        self.openai_sdk_client = openai_sdk_client
-        self.hooks = hooks
-        self.permission_callback = permission_callback
-
-    def run(
-        self,
-        session_id: str,
-        request: InputRequest | Mapping[str, Any],
-        *,
-        workdir: str | Path | None = None,
-        console: Callable[[str], None] | None = None,
-        hooks: HookRegistry | None = None,
-        permission_callback: PermissionCallback | None = None,
-    ) -> InteractionResult:
-        return run(
-            session_id,
-            request,
-            self.config,
-            openai_sdk_client=self.openai_sdk_client,
-            workdir=workdir,
-            console=console,
-            hooks=hooks or self.hooks,
-            permission_callback=permission_callback or self.permission_callback,
-        )
 
 
 class _LoopFailure(Exception):
@@ -164,19 +126,87 @@ def run(
             permission_callback=permission_callback,
             console=console,
             event_sink=session.append_event,
-            redactor=lambda value: _redact_secrets(value, config),
+            redactor=secret_redactor(os.getenv(config.model.api_key_env, "")),
             custom=hooks,
         )
         result: InteractionResult | None = None
         try:
-            result = _interact(
-                session,
-                normalized,
-                image_reference,
-                config,
-                openai_sdk_client=openai_sdk_client,
-                workdir=workdir,
-                hooks=registry,
+            if session.state.status != "running":
+                raise _LoopFailure(
+                    "session_closed",
+                    "session is not running",
+                    turn=session.state.turn,
+                    session_status=session.state.status,
+                )
+
+            try:
+                effective_workdir = normalize_workdir(session.state.workdir)
+                requested_workdir = None if workdir is None else normalize_workdir(workdir)
+            except Exception as exc:
+                raise _LoopFailure("runtime_error", str(exc), turn=session.state.turn, record=True)
+            if requested_workdir is not None and requested_workdir != effective_workdir:
+                raise _LoopFailure(
+                    "workdir_mismatch",
+                    "session is bound to a different workdir",
+                    turn=session.state.turn,
+                )
+
+            history = session.ledger.messages()
+            history_error = history_tool_error(history)
+            if history_error is not None:
+                raise _LoopFailure(
+                    "unmatched_tool_call",
+                    history_error,
+                    turn=session.state.turn,
+                    record=True,
+                )
+
+            registry.trigger(HookContext(
+                event="UserPromptSubmit", session=session, session_id=session.state.session_id,
+                turn=session.state.turn, query=normalized.query, workdir=effective_workdir,
+            ))
+
+            if normalized.query is None:
+                _append_user_message(session, f"Image reference received: {image_reference}")
+                result = InteractionResult(
+                    session_id=session.state.session_id,
+                    status="not_supported",
+                    session_status=session.state.status,
+                    turn=session.state.turn,
+                )
+                return result
+
+            try:
+                if session.state.query is None:
+                    session.state.query = normalized.query
+                if openai_sdk_client is not None:
+                    client = openai_sdk_client
+                else:
+                    kwargs: dict[str, Any] = {
+                        "api_key": config.api_key(),
+                        "timeout": config.model.timeout_s,
+                    }
+                    if config.model.base_url:
+                        kwargs["base_url"] = config.model.base_url
+                    client = OpenAI(**kwargs)
+            except ConfigError as exc:
+                raise _LoopFailure(exc.code, exc.message, turn=session.state.turn)
+            except ValueError as exc:
+                raise _LoopFailure(
+                    str(exc),
+                    str(exc),
+                    turn=session.state.turn,
+                    session_status=session.state.status,
+                )
+            except Exception as exc:
+                raise _LoopFailure("runtime_error", str(exc), turn=session.state.turn)
+
+            _append_user_message(
+                session, build_user_message_content(normalized.query, image_reference)
+            )
+            result = _drive_turns(
+                session, config, client, workdir=effective_workdir, hooks=registry,
+                query=normalized.query,
             )
             return result
         except _LoopFailure as failure:
@@ -213,94 +243,6 @@ def _append_user_message(session: Session, content: Any) -> None:
             turn=session.state.turn,
             session_status=session.state.status,
         )
-
-
-def _interact(
-    session: Session,
-    normalized: InputRequest,
-    image_reference: str | None,
-    config: Config,
-    *,
-    openai_sdk_client: Any | None,
-    workdir: str | Path | None,
-    hooks: HookRegistry,
-) -> InteractionResult:
-    if session.state.status != "running":
-        raise _LoopFailure(
-            "session_closed",
-            "session is not running",
-            turn=session.state.turn,
-            session_status=session.state.status,
-        )
-
-    try:
-        effective_workdir = normalize_workdir(session.state.workdir)
-        requested_workdir = None if workdir is None else normalize_workdir(workdir)
-    except Exception as exc:
-        raise _LoopFailure("runtime_error", str(exc), turn=session.state.turn, record=True)
-    if requested_workdir is not None and requested_workdir != effective_workdir:
-        raise _LoopFailure(
-            "workdir_mismatch",
-            "session is bound to a different workdir",
-            turn=session.state.turn,
-        )
-
-    history = session.ledger.messages()
-    history_error = history_tool_error(history)
-    if history_error is not None:
-        raise _LoopFailure(
-            "unmatched_tool_call",
-            history_error,
-            turn=session.state.turn,
-            record=True,
-        )
-
-    hooks.trigger(HookContext(
-        event="UserPromptSubmit", session=session, session_id=session.state.session_id,
-        turn=session.state.turn, query=normalized.query, workdir=effective_workdir,
-    ))
-
-    if normalized.query is None:
-        _append_user_message(session, f"Image reference received: {image_reference}")
-        return InteractionResult(
-            session_id=session.state.session_id,
-            status="not_supported",
-            session_status=session.state.status,
-            turn=session.state.turn,
-        )
-
-    try:
-        if session.state.query is None:
-            session.state.query = normalized.query
-        if openai_sdk_client is not None:
-            client = openai_sdk_client
-        else:
-            kwargs: dict[str, Any] = {
-                "api_key": config.api_key(),
-                "timeout": config.model.timeout_s,
-            }
-            if config.model.base_url:
-                kwargs["base_url"] = config.model.base_url
-            client = OpenAI(**kwargs)
-    except ConfigError as exc:
-        raise _LoopFailure(exc.code, exc.message, turn=session.state.turn)
-    except ValueError as exc:
-        raise _LoopFailure(
-            str(exc),
-            str(exc),
-            turn=session.state.turn,
-            session_status=session.state.status,
-        )
-    except Exception as exc:
-        raise _LoopFailure("runtime_error", str(exc), turn=session.state.turn)
-
-    _append_user_message(
-        session, build_user_message_content(normalized.query, image_reference)
-    )
-    return _drive_turns(
-        session, config, client, workdir=effective_workdir, hooks=hooks,
-        query=normalized.query,
-    )
 
 
 def _drive_turns(
@@ -504,22 +446,13 @@ def _classify_model_exception(exc: Exception) -> str:
     return "model_unavailable"
 
 
-def _redact_secrets(text: str, config: Config | None) -> str:
-    """Replace the configured API key value wherever it appears in text."""
-
-    if config is None:
-        return text
-    secret = os.getenv(config.model.api_key_env, "")
-    if not secret:
-        return text
-    return text.replace(secret, "[REDACTED]")
-
-
 def _safe_exception_message(exc: Exception, config: Config | None = None) -> str:
     # SDK exceptions can echo request headers. Keep the user-facing message
     # short and never include values of configured secret variables.
     message = str(exc).strip() or type(exc).__name__
-    return _redact_secrets(message, config)[:1000]
+    if config is not None:
+        message = redact_text(message, secret_redactor(os.getenv(config.model.api_key_env, "")))
+    return message[:1000]
 
 
 def create_session(

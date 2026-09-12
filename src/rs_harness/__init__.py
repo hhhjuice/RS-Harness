@@ -1,8 +1,8 @@
 """RS-Harness public package."""
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
-from .agent_loop import AgentLoop, InputRequest, close_session, create_session, run
+from .agent_loop import InputRequest, close_session, create_session, run
 from .config import Config, ConfigError, LoopConfig, ModelConfig, RuntimeConfig
 from .runtime.session import ErrorInfo, InteractionResult, SessionResult, SessionState, SessionStatus
 from .runtime.trace import EventLedger
@@ -30,7 +30,6 @@ __all__ = [
     "RuntimeConfig",
     "ErrorInfo",
     "InteractionResult",
-    "AgentLoop",
     "InputRequest",
     "SessionResult",
     "SessionState",

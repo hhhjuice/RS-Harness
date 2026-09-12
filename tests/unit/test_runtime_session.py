@@ -41,10 +41,11 @@ def test_create_open_and_append_complete_message_ledger(tmp_path):
         }
     ]
 
-    session.append_message({"role": "user", "content": "hello"})
-    session.append_message(
-        {"role": "assistant", "content": "hi", "tool_calls": [{"id": "c1"}]}
-    )
+    with session.locked():
+        session.append({"role": "user", "content": "hello"})
+        session.append(
+            {"role": "assistant", "content": "hi", "tool_calls": [{"id": "c1"}]}
+        )
     reopened = Session.open(config, session.state.session_id)
     assert reopened.messages()[-2:] == [
         {"role": "user", "content": "hello"},
@@ -67,22 +68,23 @@ def test_close_is_idempotent_and_rejects_new_messages(tmp_path):
     second = session.close(status="closed", answer="ignored")
     assert second == first
     assert not (session.path / "result.json").exists()
-    with pytest.raises(ValueError, match="session_closed"):
-        session.append_message({"role": "user", "content": "late"})
+    with session.locked(), pytest.raises(ValueError, match="session_closed"):
+        session.append({"role": "user", "content": "late"})
 
 
 def test_ledger_redacts_credentials_and_data_values(tmp_path):
     session = Session.create(make_config(tmp_path))
-    session.append_message(
-        {
-            "role": "tool",
-            "content": {
-                "token": "secret-token",
-                "payload": "data:image/tiff;base64," + "A" * 100,
-                "text": "ordinary content",
-            },
-        }
-    )
+    with session.locked():
+        session.append(
+            {
+                "role": "tool",
+                "content": {
+                    "token": "secret-token",
+                    "payload": "data:image/tiff;base64," + "A" * 100,
+                    "text": "ordinary content",
+                },
+            }
+        )
     raw = (session.path / "messages.jsonl").read_text(encoding="utf-8")
     assert "secret-token" not in raw
     assert "data:image/tiff" not in raw
@@ -91,7 +93,8 @@ def test_ledger_redacts_credentials_and_data_values(tmp_path):
 
 def test_close_derives_last_assistant_text(tmp_path):
     session = Session.create(make_config(tmp_path))
-    session.append_message({"role": "assistant", "content": "derived answer"})
+    with session.locked():
+        session.append({"role": "assistant", "content": "derived answer"})
     result = session.close()
     assert result.answer == "derived answer"
     assert session.state.answer == "derived answer"
@@ -99,38 +102,42 @@ def test_close_derives_last_assistant_text(tmp_path):
 
 def test_close_derives_text_blocks_and_explicit_answer_wins(tmp_path):
     session = Session.create(make_config(tmp_path))
-    session.append_message(
-        {"role": "assistant", "content": [{"type": "text", "text": "one"}, {"type": "text", "text": "two"}]}
-    )
+    with session.locked():
+        session.append(
+            {"role": "assistant", "content": [{"type": "text", "text": "one"}, {"type": "text", "text": "two"}]}
+        )
     assert session.close().answer == "one\ntwo"
 
     explicit = Session.create(make_config(tmp_path))
-    explicit.append_message({"role": "assistant", "content": "ledger answer"})
+    with explicit.locked():
+        explicit.append({"role": "assistant", "content": "ledger answer"})
     assert explicit.close(answer="explicit answer").answer == "explicit answer"
 
 
 def test_close_does_not_derive_text_from_assistant_tool_planning(tmp_path):
     session = Session.create(make_config(tmp_path))
-    session.append_message(
-        {
-            "role": "assistant",
-            "content": "planning text",
-            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}],
-        }
-    )
+    with session.locked():
+        session.append(
+            {
+                "role": "assistant",
+                "content": "planning text",
+                "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}],
+            }
+        )
     assert session.close().answer is None
 
 
 def test_close_does_not_fall_back_to_older_answer_after_tool_planning(tmp_path):
     session = Session.create(make_config(tmp_path))
-    session.append_message({"role": "assistant", "content": "old answer"})
-    session.append_message(
-        {
-            "role": "assistant",
-            "content": "planning text",
-            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}],
-        }
-    )
+    with session.locked():
+        session.append({"role": "assistant", "content": "old answer"})
+        session.append(
+            {
+                "role": "assistant",
+                "content": "planning text",
+                "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}],
+            }
+        )
     assert session.close().answer is None
 
 
@@ -145,11 +152,48 @@ def test_old_session_without_workdir_remains_loadable(tmp_path):
     assert reopened.state.workdir is None
 
 
+def test_messages_returns_fresh_list_shell(tmp_path):
+    session = Session.create(make_config(tmp_path))
+    with session.locked():
+        session.append({"role": "user", "content": "hello"})
+    messages = session.messages()
+    messages.append({"role": "user", "content": "mutated by caller"})
+    reopened = Session.open(make_config(tmp_path), session.state.session_id)
+    assert len(reopened.messages()) == 2
+    assert reopened.messages()[-1]["content"] == "hello"
+
+
+def test_ledger_skips_corrupt_lines_and_continues_seq(tmp_path):
+    config = make_config(tmp_path)
+    session = Session.create(config)
+    with session.locked():
+        session.append({"role": "user", "content": "good"})
+    with (session.path / "messages.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write("{corrupt json\n")
+        handle.write('{"no_seq": true}\n')
+
+    reopened = Session.open(config, session.state.session_id)
+    assert [message["content"] for message in reopened.messages()][-1] == "good"
+    with reopened.locked():
+        reopened.append({"role": "user", "content": "after corruption"})
+
+    final = Session.open(config, session.state.session_id)
+    assert [message["content"] for message in final.messages()][-1] == "after corruption"
+    ledger_path = session.path / "messages.jsonl"
+    records = [
+        json.loads(line)
+        for line in ledger_path.read_text(encoding="utf-8").splitlines()
+        if '"seq"' in line
+    ]
+    assert [record["seq"] for record in records] == [1, 2, 3]
+
+
 def test_list_returns_all_session_states_and_skips_strays(tmp_path):
     config = make_config(tmp_path)
     first = Session.create(config)
     second = Session.create(config)
-    second.append_message({"role": "user", "content": "hi"})
+    with second.locked():
+        second.append({"role": "user", "content": "hi"})
     second.close()
     (config.runtime.sessions_dir / "stray.txt").write_text("not a session", encoding="utf-8")
     broken = config.runtime.sessions_dir / "broken"

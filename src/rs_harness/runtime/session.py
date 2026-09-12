@@ -167,10 +167,6 @@ class Session:
     def save_state(self) -> None:
         _atomic_json_write(self.path / "session.json", self.state.model_dump(mode="json"))
 
-    def append_message(self, message: dict[str, Any]) -> int:
-        with self.locked():
-            return self.append(message)
-
     def append_event(self, event: dict[str, Any]) -> int:
         """Append a structured lifecycle event; caller must hold the lock."""
         return self.events.append(event)

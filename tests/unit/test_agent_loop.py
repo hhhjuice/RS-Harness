@@ -86,7 +86,7 @@ def test_openai_tool_request_is_executed_and_budgeted(tmp_path):
     assert result.status == "failed"
     assert result.errors[0].code == "budget_exceeded"
     assert fake.calls[0]["tools"]
-    messages = session.messages()
+    messages = Session.open(config, session.state.session_id).messages()
     assert messages[-1] == {
         "role": "tool",
         "tool_call_id": "call_1",

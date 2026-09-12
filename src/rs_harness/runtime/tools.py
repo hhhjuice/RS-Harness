@@ -30,6 +30,10 @@ __all__ = [
 
 _MAX_OUTPUT = 50000
 
+# Hard-deny shell patterns shared by the PreToolUse permission gate and the
+# run_bash inner fence; both sides read this single list.
+BASH_DENY_LIST = ("rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "> /dev/")
+
 
 def _truncate(value: str) -> str:
     return value[:_MAX_OUTPUT]
@@ -74,7 +78,7 @@ def run_bash(
     try:
         if not isinstance(command, str):
             return "Error: Invalid command: expected a string"
-        dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
+        dangerous = BASH_DENY_LIST
         if any(item in command for item in dangerous):
             return "Error: Dangerous command blocked"
         process = subprocess.Popen(
@@ -118,13 +122,6 @@ def run_read(
     try:
         if not isinstance(path, (str, Path)):
             return "Error: Invalid path: expected a string"
-        # Accept both ``run_read(path, limit, workdir)`` and the convenient
-        # ``run_read(path, workdir)`` form for embedders.
-        if isinstance(limit, (str, Path)):
-            if workdir is None:
-                workdir, limit = limit, None
-            elif isinstance(workdir, int) and not isinstance(workdir, bool):
-                workdir, limit = limit, workdir
         if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
             return "Error: limit must be a positive integer"
         lines = safe_path(path, workdir, allow_workspace_escape=allow_workspace_escape).read_text(encoding="utf-8").splitlines()

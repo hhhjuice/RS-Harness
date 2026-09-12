@@ -1,6 +1,6 @@
 # RS-Harness
 
-RS-Harness v0.2.0 is a minimal, model-backed Agent Harness. A session is a
+RS-Harness v0.2.1 is a minimal, model-backed Agent Harness. A session is a
 persistent model context: you can send multiple requests to the same session
 and every system, user, assistant, or tool message is appended to a complete
 JSONL ledger. OpenAI is called through its official Python SDK; there is no

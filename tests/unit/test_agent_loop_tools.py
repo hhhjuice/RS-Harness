@@ -591,13 +591,14 @@ def test_unmatched_historical_tool_call_is_not_replayed(tmp_path: Path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     session = create_session(config, workdir=workspace)
-    session.append_message(
-        {
-            "role": "assistant",
-            "content": None,
-            "tool_calls": [{"id": "old", "type": "function", "function": {"name": "bash", "arguments": "{}"}}],
-        }
-    )
+    with session.locked():
+        session.append(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "old", "type": "function", "function": {"name": "bash", "arguments": "{}"}}],
+            }
+        )
     client = SequenceClient([_response("must not run")])
 
     result = run(session.state.session_id, {"query": "continue"}, config, openai_sdk_client=client)
@@ -612,15 +613,16 @@ def test_interleaved_historical_message_before_tool_result_is_rejected(tmp_path:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     session = create_session(config, workdir=workspace)
-    session.append_message(
-        {
-            "role": "assistant",
-            "content": None,
-            "tool_calls": [{"id": "old", "type": "function", "function": {"name": "bash", "arguments": "{}"}}],
-        }
-    )
-    session.append_message({"role": "assistant", "content": "interleaved"})
-    session.append_message({"role": "tool", "tool_call_id": "old", "content": "late"})
+    with session.locked():
+        session.append(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "old", "type": "function", "function": {"name": "bash", "arguments": "{}"}}],
+            }
+        )
+        session.append({"role": "assistant", "content": "interleaved"})
+        session.append({"role": "tool", "tool_call_id": "old", "content": "late"})
 
     result = run(session.state.session_id, {"query": "continue"}, config, openai_sdk_client=SequenceClient([]))
 
