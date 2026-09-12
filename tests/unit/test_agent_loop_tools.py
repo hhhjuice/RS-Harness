@@ -105,6 +105,132 @@ def test_tool_calls_are_executed_returned_by_id_and_loop_continues(tmp_path: Pat
     ]
 
 
+def test_todo_write_persists_state_and_renders(tmp_path: Path):
+    config = _config(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    client = SequenceClient([
+        _response(calls=[_call("todo-1", "todo_write", '{"todos":[{"content":"Inspect","status":"in_progress"},{"content":"Test","status":"pending"}]}')]),
+        _response("planned"),
+    ])
+    session = create_session(config, workdir=workspace)
+    result = run(session.state.session_id, {"query": "plan"}, config, openai_sdk_client=client)
+    assert result.status == "succeeded"
+    reopened = Session.open(config, session.state.session_id)
+    assert [item.model_dump() for item in reopened.state.todos] == [
+        {"content": "Inspect", "status": "in_progress"},
+        {"content": "Test", "status": "pending"},
+    ]
+    assert "[>] Inspect" in client.calls[1]["messages"][-1]["content"]
+
+
+def test_todo_reminder_after_three_unupdated_tool_rounds_is_not_persisted(tmp_path: Path):
+    config = _config(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    client = SequenceClient([
+        _response(calls=[_call("g1", "glob", '{"pattern":"*"}')]),
+        _response(calls=[_call("g2", "glob", '{"pattern":"*"}')]),
+        _response(calls=[_call("g3", "glob", '{"pattern":"*"}')]),
+        _response("done"),
+    ])
+    session = create_session(config, workdir=workspace)
+    run(session.state.session_id, {"query": "work"}, config, openai_sdk_client=client)
+    assert any(
+        part.get("text") == "<reminder>Update your todos.</reminder>"
+        for message in client.calls[3]["messages"]
+        if message.get("role") == "user" and isinstance(message.get("content"), list)
+        for part in message["content"]
+    )
+    ledger = (session.path / "messages.jsonl").read_text(encoding="utf-8")
+    assert "<reminder>Update your todos.</reminder>" not in ledger
+
+
+def test_rejected_todo_write_does_not_reset_the_reminder_counter(tmp_path: Path):
+    config = _config(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    client = SequenceClient([
+        _response(calls=[_call("todo-1", "todo_write", '{"todos":[{"content":"One","status":"in_progress"},{"content":"Two","status":"in_progress"}]}')]),
+        _response(calls=[_call("g1", "glob", '{"pattern":"*"}')]),
+        _response(calls=[_call("g2", "glob", '{"pattern":"*"}')]),
+        _response("done"),
+    ])
+    session = create_session(config, workdir=workspace)
+    result = run(session.state.session_id, {"query": "work"}, config, openai_sdk_client=client)
+    assert result.status == "succeeded"
+    assert any(
+        part.get("text") == "<reminder>Update your todos.</reminder>"
+        for message in client.calls[3]["messages"]
+        if message.get("role") == "user" and isinstance(message.get("content"), list)
+        for part in message["content"]
+    )
+    # The rejected update left the stored list untouched.
+    assert Session.open(config, session.state.session_id).state.todos == []
+
+
+def test_any_todo_write_in_a_multi_tool_batch_resets_the_counter(tmp_path: Path):
+    config = _config(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    client = SequenceClient([
+        _response(calls=[
+            _call("g1", "glob", '{"pattern":"*"}'),
+            _call("todo-1", "todo_write", '{"todos":[{"content":"Plan","status":"completed"}]}'),
+        ]),
+        _response(calls=[_call("g2", "glob", '{"pattern":"*"}')]),
+        _response(calls=[_call("g3", "glob", '{"pattern":"*"}')]),
+        _response("done"),
+    ])
+    session = create_session(config, workdir=workspace)
+    run(session.state.session_id, {"query": "work"}, config, openai_sdk_client=client)
+    assert not any(
+        "<reminder>Update your todos.</reminder>" in str(message)
+        for message in client.calls[3]["messages"]
+    )
+    assert [item.model_dump() for item in Session.open(config, session.state.session_id).state.todos] == [
+        {"content": "Plan", "status": "completed"}
+    ]
+
+
+def test_todo_write_renders_through_console_channel(tmp_path: Path):
+    config = _config(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    client = SequenceClient([
+        _response(calls=[_call("todo-1", "todo_write", '{"todos":[{"content":"Step","status":"in_progress"}]}')]),
+        _response("planned"),
+    ])
+    session = create_session(config, workdir=workspace)
+    notices: list[str] = []
+    run(
+        session.state.session_id, {"query": "plan"}, config,
+        openai_sdk_client=client, console=lambda message: notices.append(message),
+    )
+    task_notice = next(n for n in notices if n.startswith("[HOOK] ## Current Tasks"))
+    assert "[>] Step" in task_notice
+    assert "(0/1 completed)" in task_notice
+    # A rejected update is an observation for the model, not a display.
+    assert not any("Error" in n for n in notices)
+
+
+def test_todo_reminder_counter_resets_for_each_run(tmp_path: Path):
+    config = _config(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    client = SequenceClient([
+        _response(calls=[_call("g1", "glob", '{"pattern":"*"}')]), _response("one"),
+        _response(calls=[_call("g2", "glob", '{"pattern":"*"}')]), _response("two"),
+    ])
+    session = create_session(config, workdir=workspace)
+    run(session.state.session_id, {"query": "one"}, config, openai_sdk_client=client)
+    run(session.state.session_id, {"query": "two"}, config, openai_sdk_client=client)
+    assert not any(
+        "<reminder>Update your todos.</reminder>" in str(message)
+        for message in client.calls[3]["messages"]
+    )
+
+
 def test_tool_errors_and_invalid_json_are_observations_then_model_can_recover(tmp_path: Path):
     config = _config(tmp_path)
     workspace = tmp_path / "workspace"

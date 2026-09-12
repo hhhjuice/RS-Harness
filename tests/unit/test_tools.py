@@ -19,7 +19,7 @@ JPEG = b"\xff\xd8\xff\xe0" + b"jpeg-payload"
 
 def test_tool_definitions_expose_all_workspace_tools():
     names = [item["function"]["name"] for item in TOOLS]
-    assert names == ["bash", "read_file", "write_file", "edit_file", "glob", "read_image"]
+    assert names == ["bash", "read_file", "write_file", "edit_file", "glob", "read_image", "todo_write"]
     assert all(item["type"] == "function" for item in TOOLS)
 
 

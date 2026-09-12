@@ -113,22 +113,3 @@ def test_closed_session_reports_closed_status(tmp_path):
     assert result.status == "failed"
     assert result.errors[0].code == "session_closed"
     assert result.session_status == "closed"
-
-
-def test_legacy_session_without_system_context_is_rejected(tmp_path):
-    config = make_config(tmp_path)
-    session = create_session(config)
-    state_path = session.path / "session.json"
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-    state.pop("system_context_version")
-    state_path.write_text(json.dumps(state), encoding="utf-8")
-
-    result = run(
-        session.state.session_id,
-        InputRequest(query="question"),
-        config,
-        openai_sdk_client=FakeOpenAI("unused"),
-    )
-
-    assert result.status == "failed"
-    assert result.errors[0].code == "session_context_missing"

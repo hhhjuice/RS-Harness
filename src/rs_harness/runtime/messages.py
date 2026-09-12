@@ -229,7 +229,6 @@ def messages_for_model(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "content",
         "name",
         "tool_calls",
-        "function_call",
         "refusal",
         "audio",
     }

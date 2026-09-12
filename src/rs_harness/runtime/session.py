@@ -14,10 +14,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..config import Config
 from .trace import EventLedger, MessageLedger, _json_safe, utc_now
 from .tools import normalize_workdir
+from .todos import TodoItem
 
 SessionStatus = Literal["running", "closed", "failed"]
 InteractionStatus = Literal["succeeded", "not_supported", "failed"]
-SYSTEM_CONTEXT_VERSION = 1
 
 
 class ErrorInfo(BaseModel):
@@ -37,9 +37,9 @@ class SessionState(BaseModel):
     query: str | None = None
     image: str | None = None
     workdir: str | None = None
-    system_context_version: int | None = None
     turn: int = 0
     message_count: int = 0
+    todos: list[TodoItem] = Field(default_factory=list)
     errors: list[ErrorInfo] = Field(default_factory=list)
     answer: str | None = None
     stop_reason: str | None = None
@@ -100,7 +100,6 @@ class Session:
                 query=query,
                 image=image,
                 workdir=resolved_workdir,
-                system_context_version=SYSTEM_CONTEXT_VERSION,
                 started_at=utc_now(),
             ),
             path,

@@ -22,13 +22,13 @@ from .runtime.messages import (
     safe_image_reference,
 )
 from .runtime.session import (
-    SYSTEM_CONTEXT_VERSION,
     ErrorInfo,
     InteractionResult,
     Session,
     SessionResult,
 )
 from .runtime.tools import TOOLS, dispatch_tool, normalize_workdir
+from .runtime.todos import TodoItem, TodoManager, is_error_observation
 
 __all__ = [
     "AgentLoop",
@@ -203,6 +203,18 @@ def run(
                 ))
 
 
+def _append_user_message(session: Session, content: Any) -> None:
+    try:
+        session.append({"role": "user", "content": content})
+    except ValueError as exc:
+        raise _LoopFailure(
+            str(exc),
+            str(exc),
+            turn=session.state.turn,
+            session_status=session.state.status,
+        )
+
+
 def _interact(
     session: Session,
     normalized: InputRequest,
@@ -221,27 +233,17 @@ def _interact(
             session_status=session.state.status,
         )
 
-    if session.state.system_context_version != SYSTEM_CONTEXT_VERSION:
-        raise _LoopFailure(
-            "session_context_missing",
-            "session was created without the current system context; create a new session",
-            turn=session.state.turn,
-        )
-
     try:
         effective_workdir = normalize_workdir(session.state.workdir)
-        if workdir is not None:
-            requested_workdir = normalize_workdir(workdir)
-            if requested_workdir != effective_workdir:
-                raise _LoopFailure(
-                    "workdir_mismatch",
-                    "session is bound to a different workdir",
-                    turn=session.state.turn,
-                )
-    except _LoopFailure:
-        raise
+        requested_workdir = None if workdir is None else normalize_workdir(workdir)
     except Exception as exc:
         raise _LoopFailure("runtime_error", str(exc), turn=session.state.turn, record=True)
+    if requested_workdir is not None and requested_workdir != effective_workdir:
+        raise _LoopFailure(
+            "workdir_mismatch",
+            "session is bound to a different workdir",
+            turn=session.state.turn,
+        )
 
     history = session.ledger.messages()
     history_error = history_tool_error(history)
@@ -253,25 +255,13 @@ def _interact(
             record=True,
         )
 
+    hooks.trigger(HookContext(
+        event="UserPromptSubmit", session=session, session_id=session.state.session_id,
+        turn=session.state.turn, query=normalized.query, workdir=effective_workdir,
+    ))
+
     if normalized.query is None:
-        hooks.trigger(HookContext(
-            event="UserPromptSubmit", session=session, session_id=session.state.session_id,
-            turn=session.state.turn, query=normalized.query, workdir=effective_workdir,
-        ))
-        try:
-            session.append(
-                {
-                    "role": "user",
-                    "content": f"Image reference received: {image_reference}",
-                }
-            )
-        except ValueError as exc:
-            raise _LoopFailure(
-                str(exc),
-                str(exc),
-                turn=session.state.turn,
-                session_status=session.state.status,
-            )
+        _append_user_message(session, f"Image reference received: {image_reference}")
         return InteractionResult(
             session_id=session.state.session_id,
             status="not_supported",
@@ -279,10 +269,6 @@ def _interact(
             turn=session.state.turn,
         )
 
-    hooks.trigger(HookContext(
-        event="UserPromptSubmit", session=session, session_id=session.state.session_id,
-        turn=session.state.turn, query=normalized.query, workdir=effective_workdir,
-    ))
     try:
         if session.state.query is None:
             session.state.query = normalized.query
@@ -296,14 +282,6 @@ def _interact(
             if config.model.base_url:
                 kwargs["base_url"] = config.model.base_url
             client = OpenAI(**kwargs)
-        session.append(
-            {
-                "role": "user",
-                "content": build_user_message_content(
-                    normalized.query, image_reference
-                ),
-            }
-        )
     except ConfigError as exc:
         raise _LoopFailure(exc.code, exc.message, turn=session.state.turn)
     except ValueError as exc:
@@ -316,6 +294,9 @@ def _interact(
     except Exception as exc:
         raise _LoopFailure("runtime_error", str(exc), turn=session.state.turn)
 
+    _append_user_message(
+        session, build_user_message_content(normalized.query, image_reference)
+    )
     return _drive_turns(
         session, config, client, workdir=effective_workdir, hooks=hooks,
         query=normalized.query,
@@ -333,6 +314,8 @@ def _drive_turns(
 ) -> InteractionResult:
     session_id = session.state.session_id
     messages = session.ledger.messages()
+    todo_manager = TodoManager([item.model_dump(mode="python") for item in session.state.todos])
+    rounds_since_todo = 0
     for _ in range(config.loop.max_turns):
         try:
             turn = session.next_turn()
@@ -367,7 +350,16 @@ def _drive_turns(
             )
 
         if tool_calls:
-            _execute_tool_calls(session, messages, tool_calls, workdir, config, hooks)
+            used_todo = _execute_tool_calls(
+                session, messages, tool_calls, workdir, config, hooks, todo_manager=todo_manager
+            )
+            rounds_since_todo = 0 if used_todo else rounds_since_todo + 1
+            if rounds_since_todo >= 3:
+                messages.append({
+                    "role": "user",
+                    "content": [{"type": "text", "text": "<reminder>Update your todos.</reminder>"}],
+                })
+                rounds_since_todo = 0
             continue
 
         if answer.strip():
@@ -409,8 +401,11 @@ def _execute_tool_calls(
     workdir: str,
     config: Config,
     hooks: HookRegistry,
-) -> None:
+    *,
+    todo_manager: TodoManager | None = None,
+) -> bool:
     image_attachments: list[ImageAttachment] = []
+    used_todo = False
     for tool_id, tool_name, raw_arguments in tool_calls:
         arguments, argument_error = decode_tool_arguments(raw_arguments)
         if argument_error is not None:
@@ -441,7 +436,10 @@ def _execute_tool_calls(
                     workdir,
                     bash_timeout_s=config.loop.bash_timeout_s,
                     allow_workspace_escape=bool(decision and decision.allow_workspace_escape),
+                    todo_manager=todo_manager,
                 )
+                if tool_name == "todo_write" and not is_error_observation(str(raw_output)):
+                    used_todo = True
                 if isinstance(raw_output, ImageAttachment):
                     image_attachments.append(raw_output)
                     output = (
@@ -484,6 +482,9 @@ def _execute_tool_calls(
         }
         session.append(image_message)
         messages.append(image_message)
+    if todo_manager is not None:
+        session.state.todos = [TodoItem.model_validate(item) for item in todo_manager.items]
+    return used_todo
 
 
 def _append_tool_observation(session: Session, messages: list[dict[str, Any]], tool_id: str, output: str) -> None:

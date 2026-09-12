@@ -1,6 +1,6 @@
 # RS-Harness
 
-RS-Harness v0.1.0 is a minimal, model-backed Agent Harness. A session is a
+RS-Harness v0.2.0 is a minimal, model-backed Agent Harness. A session is a
 persistent model context: you can send multiple requests to the same session
 and every system, user, assistant, or tool message is appended to a complete
 JSONL ledger. OpenAI is called through its official Python SDK; there is no
@@ -46,18 +46,27 @@ permission callback explicitly approves a single workspace escape.
 Each session writes the following files under `sessions/<session_id>/`:
 
 * `session.json` — current session metadata and lifecycle state, including the
-  absolute tool workspace.
+  absolute tool workspace and the persisted `todo_write` task list.
 * `messages.jsonl` — append-only, complete message ledger. Each record carries
   a sequence number, timestamp, and the provider message payload.
 * `events.jsonl` — append-only lifecycle audit for UserPromptSubmit, PreToolUse,
   PostToolUse, and Stop Hooks. Arguments and outputs are redacted and truncated
   before they are written.
 
-The loop exposes six workspace tools to the model: `bash`, `read_file`,
-`write_file`, `edit_file`, `glob`, and `read_image`. File-tool paths and glob matches stay
+The loop exposes seven tools to the model: `bash`, `read_file`,
+`write_file`, `edit_file`, `glob`, `read_image`, and `todo_write`. File-tool paths and glob matches stay
 inside the session workspace by default; tool failures are returned to the model as
 observations so it can recover. Tool observations are redacted against the
 configured API key before they reach the ledger, the model, or any log.
+
+`todo_write` stores a planning list in the session. It accepts at most 20 items;
+each item has non-empty `content` and a `status` of `pending`, `in_progress`, or
+`completed`, with at most one item in progress. The rendered list is shown through
+the configured console/hook channel and is not added as a separate ledger message.
+During one `ask` interaction, three consecutive tool-use rounds without a
+`todo_write` update cause the next model request to receive
+`<reminder>Update your todos.</reminder>`; the counter resets after an update and
+at the start of the next interaction.
 
 When a user asks to inspect a local image without giving a path, the model can
 use `glob` to find it and then call `read_image`. The tool result is recorded as
@@ -85,7 +94,7 @@ quietly; a closed session rejects further asks. A session with an incomplete
 historical tool call must be replaced rather than replaying the old action.
 
 The loop provides `bash`, `read_file`, `write_file`, `edit_file`, `glob`,
-and `read_image` for general workspace tasks, plus vision input for web-format images.
+`read_image`, and `todo_write` for workspace tasks, plus vision input for web-format images.
 Remote-sensing semantics stay behind the MCP boundary. Use `--workdir` to select the workspace for a session;
 it may be placed before or after a subcommand, and the subcommand value takes
 precedence.

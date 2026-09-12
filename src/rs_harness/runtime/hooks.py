@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
+from .todos import is_error_observation
+
 HookEvent = Literal["UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"]
 PermissionCallback = Callable[["PermissionRequest"], bool]
 Redactor = Callable[[str], str]
@@ -49,6 +51,13 @@ class PermissionRequest:
 
 
 HookCallback = Callable[[HookContext], HookDecision | str | None]
+
+# Returned by observer hooks that found nothing to do; ``trigger`` skips the
+# event record so the audit ledger only carries hooks that actually acted.
+_SILENT = object()
+
+# Console prefix for the todo list notice; the CLI matches it for coloring.
+TODO_NOTICE_PREFIX = "[HOOK] ## Current Tasks"
 
 _DATA_URI = re.compile(
     r"data:[\w.+-]+/[\w.+-]+(?:;[\w=.+-]+)*,[^\s\"'<>]+", re.IGNORECASE
@@ -123,6 +132,10 @@ class HookRegistry:
                 result = HookDecision(False, result)
             if context.output is not None:
                 context.output = context.redact(context.output)
+            if hook_error is None and result is _SILENT:
+                continue
+            if result is _SILENT:
+                result = None
             self._record(context, name, result, hook_error)
             if context.event == "PreToolUse" and isinstance(result, HookDecision):
                 if not result.allowed:
@@ -226,24 +239,38 @@ def context_inject_hook(context: HookContext, console: Callable[[str], None] | N
         console(f"[HOOK] UserPromptSubmit: working in {context.workdir}")
 
 
-def tool_error_hook(context: HookContext) -> None:
+def tool_error_hook(context: HookContext) -> object:
     if context.error is None or context.output is not None:
-        return
+        return _SILENT
     message = _sanitize_text(str(context.error).strip() or type(context.error).__name__, context.redact)
     context.output = f"Error: Tool execution failed: {message[:1000]}"
+    return None
 
 
-def log_hook(context: HookContext, console: Callable[[str], None] | None = None) -> None:
+def log_hook(context: HookContext, console: Callable[[str], None] | None = None) -> object:
     """PreToolUse: log every tool invocation with a short argument preview."""
     if console is None or not context.tool_name:
-        return
+        return _SILENT
     preview = str(list(context.arguments.values())[:2])[:60]
     console(f"[HOOK] {context.tool_name}({_sanitize_text(preview, context.redact)})")
+    return _SILENT  # console-only; the check_permission audit already records the call
 
 
-def large_output_hook(context: HookContext) -> None:
-    if context.output is not None and len(context.output) > 100000:
-        context.metadata["large_output"] = len(context.output)
+def large_output_hook(context: HookContext) -> object:
+    if context.output is None or len(context.output) <= 100000:
+        return _SILENT
+    context.metadata["large_output"] = len(context.output)
+    return None
+
+
+def todo_display_hook(context: HookContext, console: Callable[[str], None] | None = None) -> object:
+    """PostToolUse: surface an accepted todo_write list through the console."""
+    if console is None or context.tool_name != "todo_write":
+        return _SILENT
+    if context.output is None or is_error_observation(context.output):
+        return _SILENT
+    console(f"{TODO_NOTICE_PREFIX}\n{context.output}")
+    return None
 
 
 def summary_hook(context: HookContext, console: Callable[[str], None] | None = None) -> None:
@@ -280,6 +307,7 @@ def default_hooks(
         for name, callback in custom.callbacks("PostToolUse"):
             registry.register("PostToolUse", callback, name=name)
     registry.register("PostToolUse", large_output_hook)
+    registry.register("PostToolUse", lambda ctx: todo_display_hook(ctx, console), name="todo_display_hook")
     registry.register("Stop", lambda ctx: summary_hook(ctx, console), name="summary_hook")
     if custom is not None:
         for name, callback in custom.callbacks("Stop"):
@@ -290,5 +318,6 @@ def default_hooks(
 __all__ = [
     "HookEvent", "HookContext", "HookDecision", "HookRegistry", "PermissionRequest",
     "PermissionCallback", "check_permission", "default_hooks", "tool_error_hook",
-    "log_hook", "large_output_hook", "summary_hook",
+    "log_hook", "large_output_hook", "summary_hook", "todo_display_hook",
+    "TODO_NOTICE_PREFIX",
 ]

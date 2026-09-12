@@ -2,6 +2,7 @@
 
 from .session import ErrorInfo, InteractionResult, Session, SessionResult, SessionState
 from .trace import EventLedger, MessageLedger
+from .todos import TodoItem, TodoManager, run_todo_write
 from .hooks import (
     HookContext,
     HookDecision,
@@ -12,6 +13,7 @@ from .hooks import (
     check_permission,
     default_hooks,
     log_hook,
+    todo_display_hook,
     tool_error_hook,
 )
 from .tools import (
@@ -33,6 +35,9 @@ __all__ = [
     "InteractionResult",
     "MessageLedger",
     "EventLedger",
+    "TodoItem",
+    "TodoManager",
+    "run_todo_write",
     "Session",
     "SessionResult",
     "SessionState",
@@ -45,6 +50,7 @@ __all__ = [
     "check_permission",
     "default_hooks",
     "log_hook",
+    "todo_display_hook",
     "tool_error_hook",
     "TOOLS",
     "TOOL_HANDLERS",

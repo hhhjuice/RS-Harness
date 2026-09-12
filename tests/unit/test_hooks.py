@@ -44,17 +44,39 @@ def test_registry_short_circuits_pretool_and_records_order():
 
 
 def test_default_post_tool_hook_order_and_audit_sink():
-    events = []
+    events: list[dict] = []
     registry = default_hooks(event_sink=events.append)
     assert [name for name, _ in registry.callbacks("PreToolUse")] == ["check_permission", "log_hook"]
     assert [name for name, _ in registry.callbacks("PostToolUse")] == [
-        "tool_error_hook", "large_output_hook"
+        "tool_error_hook", "large_output_hook", "todo_display_hook"
     ]
-    context = HookContext("PostToolUse", None, "s", 1, "/tmp", tool_name="glob", output="ok")
-    registry.trigger(context)
-    assert [event["hook"] for event in events] == [
-        "tool_error_hook", "large_output_hook"
-    ]
+    # Idle observers leave no audit rows: a clean tool call records nothing.
+    registry.trigger(HookContext("PostToolUse", None, "s", 1, "/tmp", tool_name="glob", output="ok"))
+    assert events == []
+    # Active observers are still audited.
+    registry.trigger(HookContext("PostToolUse", None, "s", 1, "/tmp", tool_name="bash", error=RuntimeError("boom")))
+    registry.trigger(HookContext("PostToolUse", None, "s", 1, "/tmp", tool_name="glob", output="x" * 100001))
+    assert [event["hook"] for event in events] == ["tool_error_hook", "large_output_hook"]
+
+
+def test_clean_pre_tool_call_keeps_only_the_permission_audit_row():
+    events: list[dict] = []
+    registry = default_hooks(event_sink=events.append)
+    registry.trigger(HookContext(
+        "PreToolUse", None, "s", 1, "/tmp", tool_name="bash",
+        arguments={"command": "ls"},
+    ))
+    assert [event["hook"] for event in events] == ["check_permission"]
+
+
+def test_todo_display_hook_records_accepted_updates_only():
+    events: list[dict] = []
+    notices: list[str] = []
+    registry = default_hooks(console=lambda message: notices.append(message), event_sink=events.append)
+    registry.trigger(HookContext("PostToolUse", None, "s", 1, "/tmp", tool_name="todo_write", output="[ ] Step"))
+    registry.trigger(HookContext("PostToolUse", None, "s", 1, "/tmp", tool_name="todo_write", output="Error: todos[0] requires content"))
+    assert notices == ["[HOOK] ## Current Tasks\n[ ] Step"]
+    assert [event["hook"] for event in events] == ["todo_display_hook"]
 
 
 def test_log_hook_previews_tool_invocations_before_execution():
@@ -102,7 +124,9 @@ def test_permission_denial_and_all_hook_events_are_persisted(tmp_path):
     event_names = [event["event"] for event in events]
     assert event_names[0:2] == ["UserPromptSubmit", "PreToolUse"]
     assert event_names[-1] == "Stop"
-    assert event_names.count("PostToolUse") == 2
+    # The skipped call leaves no PostToolUse rows; the denial itself is
+    # audited on the PreToolUse permission row.
+    assert event_names.count("PostToolUse") == 0
     assert any(event["status"] == "denied" for event in events)
 
 

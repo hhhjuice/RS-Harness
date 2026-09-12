@@ -12,7 +12,7 @@ import typer
 from .agent_loop import InputRequest, close_session, create_session, run
 from .config import Config, ConfigError
 from .runtime.session import Session, SessionState
-from .runtime.hooks import PermissionRequest
+from .runtime.hooks import TODO_NOTICE_PREFIX, PermissionRequest
 
 
 def _configure_readline() -> None:
@@ -238,7 +238,8 @@ def _cli_console(message: str) -> None:
     # Hook notices share stdout with the answer/JSON payload; keep escape
     # codes out of pipes and redirected output.
     if sys.stdout.isatty():
-        print(f"\033[90m{message}\033[0m")
+        color = "33" if message.startswith(TODO_NOTICE_PREFIX) else "90"
+        print(f"\033[{color}m{message}\033[0m")
     else:
         print(message)
 

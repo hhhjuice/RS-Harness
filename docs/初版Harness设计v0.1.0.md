@@ -16,7 +16,7 @@ messages[] → OpenAI SDK → assistant message
                          └─ 无 tool call：提取文本，结束循环
 ```
 
-v0.1.0 注册六个通用工作区工具；模型可以在预算范围内多次调用并观察回填结果。遥感语义工具仍通过后续 MCP 接入，消息列表和内容块结构保持稳定。
+v0.1.0 注册六个通用工作区工具；模型可以在预算范围内多次调用并观察回填结果。遥感语义工具仍通过后续 MCP 接入，消息列表和内容块结构保持稳定。v0.2.0 在此基础上新增第七个工具 `todo_write`（会话任务规划状态，无执行能力），设计记录见 `docs/Harness设计v0.2.0-任务规划.md`。
 
 本版本的关键约束：
 
@@ -52,7 +52,7 @@ v0.1.0 注册六个通用工作区工具；模型可以在预算范围内多次�
 - 解码遥感栅格（GeoTIFF 等）的像素或地理信息；web 格式图片（JPEG/PNG/WebP/GIF ≤ 32MB）以 OpenAI `image_url` 视觉输入直传模型，影像字节永不写入轨迹。
 - 仅有影像时自动执行全部遥感能力的探索模式。
 
-参考仓库 s02 用 `bash`、文件读写和 `glob` 工具演示工具回填；RS-Harness v0.1.0 提供 `bash`、`read_file`、`write_file`、`edit_file`、`glob`、`read_image`，遥感能力仍保持 MCP 边界。后续 MCP 工具接入时，沿用同一个消息回填循环，不把工具流程硬编码成新的 Agent 类型。
+参考仓库 s02 用 `bash`、文件读写和 `glob` 工具演示工具回填；RS-Harness v0.1.0 提供 `bash`、`read_file`、`write_file`、`edit_file`、`glob`、`read_image`，遥感能力仍保持 MCP 边界。v0.2.0 起另提供 `todo_write` 维护会话任务列表（纯规划状态，不新增执行能力）。后续 MCP 工具接入时，沿用同一个消息回填循环，不把工具流程硬编码成新的 Agent 类型。
 
 ## 3. 输入与输出契约
 
@@ -139,7 +139,7 @@ OPENAI_API_KEY=your-openai-key
 打开已有 Session，读取 messages.jsonl 中的完整上下文
         │
         ▼
-调用 OpenAI Chat Completions 接口（提供六个工作区工具）
+调用 OpenAI Chat Completions 接口（提供工作区工具，v0.2.0 起含 `todo_write` 共七个）
         │
         ▼
 按 provider 原始结构追加 assistant/tool message 到 messages.jsonl

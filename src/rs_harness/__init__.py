@@ -1,12 +1,13 @@
 """RS-Harness public package."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from .agent_loop import AgentLoop, InputRequest, close_session, create_session, run
 from .config import Config, ConfigError, LoopConfig, ModelConfig, RuntimeConfig
 from .runtime.session import ErrorInfo, InteractionResult, SessionResult, SessionState, SessionStatus
 from .runtime.trace import EventLedger
-from .runtime.hooks import HookContext, HookDecision, HookEvent, HookRegistry, PermissionCallback, PermissionRequest, check_permission, default_hooks, log_hook, tool_error_hook
+from .runtime.todos import TodoItem, TodoManager, run_todo_write
+from .runtime.hooks import HookContext, HookDecision, HookEvent, HookRegistry, PermissionCallback, PermissionRequest, check_permission, default_hooks, log_hook, todo_display_hook, tool_error_hook
 from .runtime.tools import (
     TOOLS,
     TOOL_HANDLERS,
@@ -57,7 +58,11 @@ __all__ = [
     "check_permission",
     "default_hooks",
     "log_hook",
+    "todo_display_hook",
     "tool_error_hook",
     "EventLedger",
+    "TodoItem",
+    "TodoManager",
+    "run_todo_write",
     "__version__",
 ]

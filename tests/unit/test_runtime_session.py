@@ -40,7 +40,6 @@ def test_create_open_and_append_complete_message_ledger(tmp_path):
             ),
         }
     ]
-    assert session.state.system_context_version == 1
 
     session.append_message({"role": "user", "content": "hello"})
     session.append_message(

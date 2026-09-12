@@ -25,7 +25,7 @@ uv run rsh ask --config config/default.toml "问题"    # 单次请求
 - `src/rs_harness/cli.py` — Typer CLI（`ask` / `create-session` / `close-session` / `list-session`，无子命令时进交互模式）
 - `src/rs_harness/config.py` — TOML Config 加载与校验
 - `src/rs_harness/runtime/` — 会话与工具运行时：
-  - `session.py` 会话状态与生命周期；`tools.py` 六个工具与 `safe_path` 围栏；`hooks.py` HookRegistry 与权限回调；`messages.py` 消息构造与工具参数解码；`images.py` 图像附件；`trace.py` messages/events 双 JSONL 账本
+  - `session.py` 会话状态与生命周期；`tools.py` 七个工具与 `safe_path` 围栏；`hooks.py` HookRegistry 与权限回调；`messages.py` 消息构造与工具参数解码；`images.py` 图像附件；`todos.py` 任务规划状态；`trace.py` messages/events 双 JSONL 账本
 - `config/` — `default.toml`（实际运行）、`example.toml`（模板）
 - `prompts/system.md` — 系统提示词，必须包含 `{workdir}` 占位符
 - `tests/unit/` — 按模块拆分的单测，不真实调用模型
@@ -36,8 +36,8 @@ uv run rsh ask --config config/default.toml "问题"    # 单次请求
 
 - 分层依赖方向固定：`cli → agent_loop → runtime`；`runtime` 只依赖 `..config` 和自身子模块，禁止反向 import。
 - 公共 API 经 `src/rs_harness/__init__.py` 显式导出。新增公共符号需同步 `__all__` 与 `runtime/__init__.py` 的再导出。
-- 循环只暴露六个工具：`bash` / `read_file` / `write_file` / `edit_file` / `glob` / `read_image`。新工具要同时更新 `TOOLS` schema、`TOOL_HANDLERS` 与对应测试。
-- 文件工具路径受 `safe_path` 围栏限制在会话 workdir 内；越界必须经 `permission_callback` 批准且仅单次生效。硬拒绝的 Bash 模式不可批准。
+- 循环只暴露七个工具：`bash` / `read_file` / `write_file` / `edit_file` / `glob` / `read_image` / `todo_write`。新工具要同时更新 `TOOLS` schema、`TOOL_HANDLERS` 与对应测试。
+- 文件工具路径受 `safe_path` 围栏限制在会话 workdir 内；越界必须经 `permission_callback` 批准且仅单次生效。硬拒绝的 Bash 模式不可批准。`todo_write` 只改会话规划状态，不需要路径审批。
 - 会话创建时绑定 workdir，恢复时不可更换。
 
 ## 关键约定

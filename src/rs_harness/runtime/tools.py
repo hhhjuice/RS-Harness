@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .images import ImageAttachment, inspect_local_image
+from .todos import TodoManager, run_todo_write
 
 __all__ = [
     "TOOLS",
@@ -24,6 +25,7 @@ __all__ = [
     "run_write",
     "run_edit",
     "run_glob",
+    "run_todo_write",
 ]
 
 _MAX_OUTPUT = 50000
@@ -236,6 +238,10 @@ _TOOL_SPECS: dict[str, dict[str, Any]] = {
         "function": {"name": "read_image", "description": "Load a local JPEG, PNG, WebP, or GIF so the model can inspect its visible content.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"], "additionalProperties": False}},
         "handler": run_read_image,
     },
+    "todo_write": {
+        "function": {"name": "todo_write", "description": "Create and manage a task list for your current coding session.", "parameters": {"type": "object", "properties": {"todos": {"type": "array", "maxItems": 20, "items": {"type": "object", "properties": {"content": {"type": "string", "minLength": 1}, "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}}, "required": ["content", "status"], "additionalProperties": False}}}, "required": ["todos"], "additionalProperties": False}},
+        "handler": run_todo_write,
+    },
 }
 
 TOOLS: list[dict[str, Any]] = [
@@ -251,6 +257,7 @@ def dispatch_tool(
     *,
     bash_timeout_s: float | None = None,
     allow_workspace_escape: bool = False,
+    todo_manager: TodoManager | None = None,
 ) -> str | ImageAttachment:
     """Dispatch one decoded call and turn every handler failure into text."""
 
@@ -272,11 +279,14 @@ def dispatch_tool(
             return _truncate(
                 f"Error: Invalid arguments for {name}: unexpected {', '.join(sorted(extra))}"
             )
-        values["workdir"] = workdir
+        if name != "todo_write":
+            values["workdir"] = workdir
         if name in {"read_file", "write_file", "edit_file", "read_image"}:
             values["allow_workspace_escape"] = allow_workspace_escape
         if name == "bash" and bash_timeout_s is not None:
             values["timeout_s"] = bash_timeout_s
+        if name == "todo_write":
+            values["manager"] = todo_manager
         result = spec["handler"](**values)
         if isinstance(result, ImageAttachment):
             return result
