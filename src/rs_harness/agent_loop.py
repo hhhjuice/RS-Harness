@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Literal
@@ -12,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 from .config import Config, ConfigError
 from .runtime.images import ImageAttachment
+from .runtime.background import CONSOLE_LOCK, get_background_task_manager
 from .runtime.hooks import HookContext, HookDecision, HookEvent, HookRegistry, PermissionCallback, PermissionRequest, default_hooks
 from .runtime.messages import (
     assistant_turn,
@@ -28,7 +30,7 @@ from .runtime.session import (
     Session,
     SessionResult,
 )
-from .runtime.tools import TOOLS, dispatch_tool, normalize_workdir
+from .runtime.tools import SUB_TOOLS, TOOLS, dispatch_tool, normalize_workdir
 from .runtime.todos import TodoItem, TodoManager, is_error_observation
 
 __all__ = [
@@ -95,6 +97,7 @@ def run(
     console: Callable[[str], None] | None = None,
     hooks: HookRegistry | None = None,
     permission_callback: PermissionCallback | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> InteractionResult:
     """Append one interaction to an existing session and run the model.
 
@@ -204,9 +207,27 @@ def run(
             _append_user_message(
                 session, build_user_message_content(normalized.query, image_reference)
             )
+            # A subagent session (parent_session_id set) runs the same loop with
+            # every tool except task, so delegation stays one level deep.
+            is_root = session.state.parent_session_id is None
+            task_runner = (
+                _task_runner(
+                    config, client,
+                    workdir=effective_workdir,
+                    parent_session_id=session.state.session_id,
+                    permission_callback=permission_callback,
+                    custom_hooks=hooks,
+                    console=console,
+                )
+                if is_root
+                else None
+            )
             result = _drive_turns(
                 session, config, client, workdir=effective_workdir, hooks=registry,
                 query=normalized.query,
+                tools=TOOLS if is_root else SUB_TOOLS,
+                task_runner=task_runner,
+                cancel_check=cancel_check,
             )
             return result
         except _LoopFailure as failure:
@@ -253,12 +274,21 @@ def _drive_turns(
     workdir: str,
     hooks: HookRegistry,
     query: str | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    task_runner: Callable[..., str] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> InteractionResult:
     session_id = session.state.session_id
     messages = session.ledger.messages()
+    effective_tools = TOOLS if tools is None else tools
     todo_manager = TodoManager([item.model_dump(mode="python") for item in session.state.todos])
     rounds_since_todo = 0
     for _ in range(config.loop.max_turns):
+        if cancel_check is not None and cancel_check():
+            raise _LoopFailure(
+                "cancelled", "Subagent cancellation requested.",
+                turn=session.state.turn, record=True,
+            )
         try:
             turn = session.next_turn()
         except ValueError as exc:
@@ -274,9 +304,11 @@ def _drive_turns(
                 model=config.model.model,
                 messages=messages_for_model(messages),
                 max_tokens=config.model.max_tokens,
-                tools=TOOLS,
+                tools=effective_tools,
             )
-            assistant_message, tool_calls, answer = assistant_turn(response)
+            assistant_message, tool_calls, answer = assistant_turn(
+                response, redactor=secret_redactor(os.getenv(config.model.api_key_env, ""))
+            )
             session.append(assistant_message)
             messages.append(assistant_message)
         except TimeoutError as exc:
@@ -293,8 +325,14 @@ def _drive_turns(
 
         if tool_calls:
             used_todo = _execute_tool_calls(
-                session, messages, tool_calls, workdir, config, hooks, todo_manager=todo_manager
+                session, messages, tool_calls, workdir, config, hooks,
+                todo_manager=todo_manager, task_runner=task_runner,
             )
+            if cancel_check is not None and cancel_check():
+                raise _LoopFailure(
+                    "cancelled", "Subagent cancellation requested.",
+                    turn=session.state.turn, record=True,
+                )
             rounds_since_todo = 0 if used_todo else rounds_since_todo + 1
             if rounds_since_todo >= 3:
                 messages.append({
@@ -345,6 +383,7 @@ def _execute_tool_calls(
     hooks: HookRegistry,
     *,
     todo_manager: TodoManager | None = None,
+    task_runner: Callable[..., str] | None = None,
 ) -> bool:
     image_attachments: list[ImageAttachment] = []
     used_todo = False
@@ -379,6 +418,7 @@ def _execute_tool_calls(
                     bash_timeout_s=config.loop.bash_timeout_s,
                     allow_workspace_escape=bool(decision and decision.allow_workspace_escape),
                     todo_manager=todo_manager,
+                    task_runner=task_runner,
                 )
                 if tool_name == "todo_write" and not is_error_observation(str(raw_output)):
                     used_todo = True
@@ -455,6 +495,212 @@ def _safe_exception_message(exc: Exception, config: Config | None = None) -> str
     return message[:1000]
 
 
+def _task_runner(
+    config: Config,
+    client: Any,
+    *,
+    workdir: str,
+    parent_session_id: str,
+    permission_callback: PermissionCallback | None,
+    custom_hooks: HookRegistry | None,
+    console: Callable[[str], None] | None,
+) -> Callable[..., str]:
+    """Build the delegation entry the task tool calls from a root loop.
+
+    Each interaction reuses ``run`` and the child's durable context. Only
+    its identity, interaction status, and final text return to the parent.
+    """
+
+    manager = get_background_task_manager(
+        config.runtime.sessions_dir, config.runtime.max_background_subagents
+    )
+
+    def render(
+        sub: Session,
+        operation_status: str,
+        body: str,
+        *,
+        execution_status: str | None = None,
+    ) -> str:
+        redactor = secret_redactor(os.getenv(config.model.api_key_env, ""))
+        display_name = redact_text(sub.state.name or "未命名子代理", redactor)
+        return redact_text(
+            f"session_id: {sub.state.session_id}\nname: {display_name}\n"
+            f"status: {operation_status}\n"
+            f"execution_status: {execution_status or sub.state.execution_status}\n"
+            f"session_status: {sub.state.status}\n\n{body}",
+            redactor,
+        )
+
+    def mark_interrupted(sub: Session) -> Session:
+        if sub.state.execution_status in ("queued", "running", "cancel_requested"):
+            if manager.status(sub.state.session_id) is None and sub.state.execution_owner_pid != os.getpid():
+                sub.update_execution(
+                    "interrupted",
+                    error=ErrorInfo(code="background_interrupted", message="Background worker is no longer active."),
+                    owner_pid=None,
+                )
+                sub = Session.open(config, sub.state.session_id)
+        return sub
+
+    def runner(
+        prompt: str | None = None,
+        *,
+        action: str = "run",
+        session_id: str | None = None,
+        name: str | None = None,
+        background: bool = True,
+        timeout_ms: int = 0,
+    ) -> str:
+        redactor = secret_redactor(os.getenv(config.model.api_key_env, ""))
+        try:
+            if session_id is None:
+                safe_name = redact_text(name or "", redactor)
+                sub = Session.create(
+                    config,
+                    query=redact_text(prompt or "", redactor),
+                    workdir=workdir,
+                    system_prompt=redact_text(
+                        f"{config.subagent_system_prompt(workdir)}\n\nSubagent name: {safe_name}",
+                        redactor,
+                    ),
+                    parent_session_id=parent_session_id,
+                    name=safe_name,
+                )
+            else:
+                sub = mark_interrupted(Session.open(config, session_id))
+                if sub.state.parent_session_id != parent_session_id:
+                    return "Error: Subagent does not belong to this parent session"
+                if normalize_workdir(sub.state.workdir) != workdir:
+                    return "Error: Subagent is bound to a different workdir"
+        except Exception as exc:
+            return f"Error: Unable to open or create subagent: {_safe_exception_message(exc, config)}"
+
+        if action in ("status", "wait"):
+            snapshot = manager.status(sub.state.session_id)
+            if action == "wait" and sub.state.execution_status in ("queued", "running", "cancel_requested"):
+                snapshot = manager.wait(sub.state.session_id, timeout_ms / 1000)
+                sub = mark_interrupted(Session.open(config, sub.state.session_id))
+            else:
+                sub = mark_interrupted(Session.open(config, sub.state.session_id))
+            body = sub.state.execution_answer or (
+                sub.state.execution_error.message if sub.state.execution_error else "No completed result yet."
+            )
+            execution_status = snapshot.status if snapshot is not None else sub.state.execution_status
+            op_status = "succeeded" if execution_status == "succeeded" else (
+                "running" if execution_status in ("queued", "running", "cancel_requested") else "failed"
+            )
+            if snapshot is not None and snapshot.error and not sub.state.execution_error:
+                body = snapshot.error
+            elif snapshot is not None and snapshot.answer is not None and sub.state.execution_answer is None:
+                body = snapshot.answer
+            return render(sub, op_status, body, execution_status=execution_status)
+
+        if action == "close":
+            snap = manager.request_cancel(sub.state.session_id)
+            if snap is not None and snap.status == "cancel_requested":
+                return render(
+                    sub,
+                    "running",
+                    "Cancellation requested; the current model/tool batch will finish first.",
+                    execution_status="cancel_requested",
+                )
+            sub = Session.open(config, sub.state.session_id)
+            if snap is None and sub.state.execution_status in ("queued", "running", "cancel_requested"):
+                sub = mark_interrupted(sub)
+            if sub.state.execution_status == "cancelled" and sub.state.status == "running":
+                sub.close()
+            elif sub.state.status == "running":
+                sub.close()
+            sub = Session.open(config, sub.state.session_id)
+            return render(sub, "succeeded", "Subagent is closed.")
+
+        if sub.state.status != "running":
+            return render(sub, "failed", "Subagent failed (session_closed): session is not running")
+        if sub.state.execution_status in ("queued", "running", "cancel_requested"):
+            return render(sub, "running", "Subagent already has an active background execution.")
+
+        safe_prompt = redact_text(prompt or "", redactor)
+        display_name = redact_text(sub.state.name or "未命名子代理", redactor)
+        console_name = display_name.replace("\\", "\\\\").replace("|", "\\|").replace("]", "\\]")
+
+        def execute(cancel_check: Callable[[], bool]) -> str:
+            def notify(line: str) -> None:
+                if console is None:
+                    return
+                with CONSOLE_LOCK:
+                    console(f"[sub:{console_name}|{sub.state.session_id}] {line}")
+
+            sub_console = None if console is None else (
+                notify
+            )
+            result = run(
+                sub.state.session_id,
+                InputRequest(query=safe_prompt),
+                config,
+                openai_sdk_client=client,
+                workdir=workdir,
+                console=sub_console,
+                hooks=custom_hooks,
+                permission_callback=permission_callback,
+                cancel_check=cancel_check,
+            )
+            if result.status != "succeeded":
+                error = result.errors[0] if result.errors else None
+                raise RuntimeError(f"{error.code if error else result.status}: {error.message if error else 'subagent failed'}")
+            return result.answer or "(subagent returned no summary)"
+
+        if not background:
+            execution_id = uuid.uuid4().hex
+            sub.update_execution("queued", execution_id=execution_id, owner_pid=os.getpid())
+            sub.update_execution("running", execution_id=execution_id, owner_pid=os.getpid())
+            try:
+                answer = execute(lambda: False)
+            except Exception as exc:
+                sub.update_execution("failed", error=ErrorInfo(code="background_error", message=_safe_exception_message(exc, config)))
+                sub = Session.open(config, sub.state.session_id)
+                return render(sub, "failed", f"Subagent failed (background_error): {_safe_exception_message(exc, config)}")
+            sub.update_execution("succeeded", answer=answer, owner_pid=os.getpid())
+            return render(Session.open(config, sub.state.session_id), "succeeded", answer)
+
+        def on_status(status: str, **metadata: Any) -> object:
+            fresh = Session.open(config, sub.state.session_id)
+            if status == "running":
+                return fresh.claim_execution(metadata["execution_id"])
+            error = metadata.get("error")
+            error_info = ErrorInfo(code="background_error", message=str(error)) if error else None
+            fresh.update_execution(
+                status,
+                execution_id=metadata["execution_id"],
+                answer=metadata.get("answer"),
+                error=error_info,
+                owner_pid=metadata.get("owner_pid"),
+            )
+            if status == "cancelled" and fresh.state.status == "running":
+                fresh.close()
+            return None
+
+        try:
+            manager.submit(
+                sub.state.session_id,
+                safe_prompt,
+                execute,
+                parent_id=parent_session_id,
+                on_status=on_status,
+            )
+        except ValueError as exc:
+            return render(Session.open(config, sub.state.session_id), "failed", str(exc))
+        sub = Session.open(config, sub.state.session_id)
+        if sub.state.execution_status == "succeeded":
+            return render(sub, "succeeded", sub.state.execution_answer or "(subagent returned no summary)")
+        if sub.state.execution_status == "failed":
+            message = sub.state.execution_error.message if sub.state.execution_error else "subagent failed"
+            return render(sub, "failed", f"Subagent failed: {message}")
+        return render(sub, "running", "Background subagent queued.")
+
+    return runner
+
+
 def create_session(
     config: Config,
     *,
@@ -472,7 +718,41 @@ def create_session(
 
 
 def close_session(config: Config, session_id: str, *, status: str = "closed") -> SessionResult:
-    return Session.open(config, session_id).close(status)  # type: ignore[arg-type]
+    # Finish the parent's locked close before acquiring any child locks.
+    result = Session.open(config, session_id).close(status)  # type: ignore[arg-type]
+    manager = get_background_task_manager(
+        config.runtime.sessions_dir, config.runtime.max_background_subagents
+    )
+    failures: list[str] = []
+    for state in Session.list(config):
+        if state.parent_session_id != session_id:
+            continue
+        try:
+            snapshot = manager.request_cancel(state.session_id)
+            if snapshot is not None and snapshot.status in ("running", "cancel_requested"):
+                manager.wait(state.session_id)
+            child = Session.open(config, state.session_id)
+            if snapshot is None and child.state.execution_status in ("queued", "running", "cancel_requested"):
+                child.update_execution(
+                    "cancelled",
+                    error=ErrorInfo(
+                        code="background_interrupted",
+                        message="Background worker was unavailable during parent close.",
+                    ),
+                    owner_pid=None,
+                )
+                child = Session.open(config, state.session_id)
+            if child.state.status == "running":
+                child.close(result.status)  # type: ignore[arg-type]
+        except Exception as exc:
+            failures.append(f"{state.session_id}: {_safe_exception_message(exc, config)}")
+    if failures:
+        raise ConfigError(
+            "subagent_close_failed",
+            "Parent session is closed; retry close-session to finish closing subagents: "
+            + "; ".join(failures),
+        )
+    return result
 
 
 def _interaction_failure(

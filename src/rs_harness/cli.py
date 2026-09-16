@@ -145,7 +145,15 @@ def close_session_command(
     session_id: Annotated[str, typer.Option("--session-id")],
     config: Annotated[Path, typer.Option("--config", exists=False)] = Path("config/default.toml"),
 ) -> None:
-    _echo(close_session(Config.load(config), session_id).model_dump_json(indent=2))
+    try:
+        result = close_session(Config.load(config), session_id)
+    except ConfigError as exc:
+        _print_error(exc.code, exc.message, as_json=False)
+        raise typer.Exit(1) from exc
+    except Exception as exc:
+        _print_error("runtime_error", str(exc), as_json=False)
+        raise typer.Exit(1) from exc
+    _echo(result.model_dump_json(indent=2))
 
 
 @app.command("list-session")
@@ -195,9 +203,12 @@ def _list_sessions_impl(config_path: Path) -> int:
     except Exception as exc:
         _print_error("runtime_error", str(exc), as_json=False)
         return 1
+    # Subagent sessions are internal delegation artifacts; only user-created
+    # roots are listed.
+    roots = [state for state in sessions if state.parent_session_id is None]
     _echo(
         json.dumps(
-            [_session_summary(state) for state in sessions], ensure_ascii=False, indent=2
+            [_session_summary(state) for state in roots], ensure_ascii=False, indent=2
         )
     )
     return 0
@@ -236,9 +247,10 @@ def _format_session_history(messages: list[dict[str, object]]) -> str:
 
 def _cli_console(message: str) -> None:
     # Hook notices share stdout with the answer/JSON payload; keep escape
-    # codes out of pipes and redirected output.
+    # codes out of pipes and redirected output. Subagent notices carry a
+    # "[sub:<name>|<id>] " prefix, so the todo marker is matched anywhere in the line.
     if sys.stdout.isatty():
-        color = "33" if message.startswith(TODO_NOTICE_PREFIX) else "90"
+        color = "33" if TODO_NOTICE_PREFIX in message else "90"
         print(f"\033[{color}m{message}\033[0m")
     else:
         print(message)
@@ -309,7 +321,15 @@ def _interactive_impl(
             _echo(f"Resume with: uv run rsh --session-id {session_id}")
             return 0
         if text == "/close":
-            _echo(session.close().model_dump_json(indent=2))
+            try:
+                result = close_session(config, session_id)
+            except ConfigError as exc:
+                _print_error(exc.code, exc.message, as_json=False)
+                continue
+            except Exception as exc:
+                _print_error("runtime_error", str(exc), as_json=False)
+                continue
+            _echo(result.model_dump_json(indent=2))
             return 0
         if text.startswith("/"):
             _echo(f"Unknown command: {text}", err=True)

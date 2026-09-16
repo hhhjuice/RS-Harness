@@ -4,6 +4,9 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+from typer.testing import CliRunner
+
 from rs_harness import cli
 from rs_harness.config import ConfigError
 from rs_harness.runtime.session import InteractionResult, SessionResult, SessionState
@@ -149,6 +152,7 @@ def test_list_sessions_impl_prints_summaries_as_json_array(monkeypatch, tmp_path
     states = [
         SessionState(session_id="s1", status="running", query="hello"),
         SessionState(session_id="s2", status="closed", turn=3, message_count=4),
+        SessionState(session_id="s3", status="closed", parent_session_id="s1"),
     ]
     monkeypatch.setattr(cli.Config, "load", lambda _: config)
     monkeypatch.setattr(cli.Session, "list", classmethod(lambda cls, loaded: states))
@@ -156,6 +160,7 @@ def test_list_sessions_impl_prints_summaries_as_json_array(monkeypatch, tmp_path
     assert cli._list_sessions_impl(tmp_path / "config.toml") == 0
 
     payload = json.loads(capsys.readouterr().out)
+    # s3 is a subagent session; only user-created roots are listed.
     assert [item["session_id"] for item in payload] == ["s1", "s2"]
     assert payload[0]["status"] == "running"
     assert payload[0]["query"] == "hello"
@@ -236,12 +241,14 @@ def test_interactive_resume_does_not_create_new_session(monkeypatch, tmp_path, c
     assert "Resume with: uv run rsh --session-id existing" in output
 
 
-def test_interactive_exit_alias_leaves_session_running(monkeypatch, tmp_path, capsys):
+@pytest.mark.parametrize("command", ["/quit", "/exit"])
+def test_interactive_exit_leaves_session_running(monkeypatch, tmp_path, capsys, command):
     config = object()
     session = _fake_session("existing")
     monkeypatch.setattr(cli.Config, "load", lambda _: config)
     monkeypatch.setattr(cli.Session, "open", lambda loaded, session_id: session)
-    monkeypatch.setattr("builtins.input", lambda _prompt: "/exit")
+    monkeypatch.setattr("builtins.input", lambda _prompt: command)
+    monkeypatch.setattr(cli, "close_session", lambda *args: pytest.fail("must not close"))
 
     assert cli._interactive_impl(tmp_path / "config.toml", "existing") == 0
     assert session.state.status == "running"
@@ -278,10 +285,94 @@ def test_interactive_close_closes_session_and_exits(monkeypatch, tmp_path, capsy
     monkeypatch.setattr(cli.Config, "load", lambda _: config)
     monkeypatch.setattr(cli, "create_session", lambda loaded: session)
     monkeypatch.setattr("builtins.input", lambda _prompt: "/close")
+    close_calls = []
+
+    def fake_close(loaded, session_id):
+        close_calls.append((loaded, session_id))
+        return session.close()
+
+    monkeypatch.setattr(cli, "close_session", fake_close)
 
     assert cli._interactive_impl(tmp_path / "config.toml", None) == 0
+    assert close_calls == [(config, "session-1")]
     assert session.closed is True
     assert '"status": "closed"' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        (ConfigError("subagent_close_failed", "child cleanup failed"), "subagent_close_failed: child cleanup failed"),
+        (RuntimeError("child cleanup failed"), "runtime_error: child cleanup failed"),
+    ],
+)
+def test_interactive_close_failure_allows_retry(monkeypatch, tmp_path, capsys, error, message):
+    config = object()
+    session = _fake_session("session-1")
+    monkeypatch.setattr(cli.Config, "load", lambda _: config)
+    monkeypatch.setattr(cli, "create_session", lambda loaded: session)
+    inputs = iter(["/close", "/close"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(inputs))
+    close_calls = []
+
+    def fake_close(loaded, session_id):
+        close_calls.append((loaded, session_id))
+        if len(close_calls) == 1:
+            raise error
+        return session.close()
+
+    monkeypatch.setattr(cli, "close_session", fake_close)
+
+    assert cli._interactive_impl(tmp_path / "config.toml", None) == 0
+    assert close_calls == [(config, "session-1"), (config, "session-1")]
+    output = capsys.readouterr()
+    assert message in output.err
+    assert '"status": "closed"' in output.out
+
+
+def test_close_session_command_uses_public_close(monkeypatch, tmp_path):
+    config = object()
+    session = _fake_session("session-1")
+    monkeypatch.setattr(cli.Config, "load", lambda _: config)
+    close_calls = []
+
+    def fake_close(loaded, session_id):
+        close_calls.append((loaded, session_id))
+        return session.close()
+
+    monkeypatch.setattr(cli, "close_session", fake_close)
+    result = CliRunner().invoke(
+        cli.app,
+        ["close-session", "--session-id", "session-1", "--config", str(tmp_path / "config.toml")],
+    )
+
+    assert result.exit_code == 0
+    assert close_calls == [(config, "session-1")]
+    assert json.loads(result.stdout)["status"] == "closed"
+
+
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        (ConfigError("subagent_close_failed", "child cleanup failed"), "subagent_close_failed: child cleanup failed"),
+        (RuntimeError("child cleanup failed"), "runtime_error: child cleanup failed"),
+    ],
+)
+def test_close_session_command_reports_failure(monkeypatch, tmp_path, error, message):
+    monkeypatch.setattr(cli.Config, "load", lambda _: object())
+
+    def fail_close(*args):
+        raise error
+
+    monkeypatch.setattr(cli, "close_session", fail_close)
+    result = CliRunner().invoke(
+        cli.app,
+        ["close-session", "--session-id", "session-1", "--config", str(tmp_path / "config.toml")],
+    )
+
+    assert result.exit_code == 1
+    assert message in result.stderr
+    assert result.stdout == ""
 
 
 def test_interactive_eof_leaves_session_running(monkeypatch, tmp_path, capsys):

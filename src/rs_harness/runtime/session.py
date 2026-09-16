@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -18,6 +19,17 @@ from .todos import TodoItem
 
 SessionStatus = Literal["running", "closed", "failed"]
 InteractionStatus = Literal["succeeded", "not_supported", "failed"]
+ExecutionStatus = Literal[
+    "idle",
+    "queued",
+    "running",
+    "succeeded",
+    "failed",
+    "cancel_requested",
+    "cancelled",
+    "interrupted",
+]
+_UNSET = object()
 
 
 class ErrorInfo(BaseModel):
@@ -34,6 +46,8 @@ class SessionState(BaseModel):
     session_id: str
     status: SessionStatus = "running"
     mode: Literal["instruction", "exploration"] = "instruction"
+    parent_session_id: str | None = None
+    name: str | None = None
     query: str | None = None
     image: str | None = None
     workdir: str | None = None
@@ -45,6 +59,15 @@ class SessionState(BaseModel):
     stop_reason: str | None = None
     started_at: str = Field(default_factory=utc_now)
     finished_at: str | None = None
+    # Background subagent execution state is independent of session lifecycle.
+    # Defaults keep older session.json files loadable.
+    execution_status: ExecutionStatus = "idle"
+    execution_id: str | None = None
+    execution_answer: str | None = None
+    execution_error: ErrorInfo | None = None
+    execution_started_at: str | None = None
+    execution_finished_at: str | None = None
+    execution_owner_pid: int | None = None
 
 
 class SessionResult(BaseModel):
@@ -87,9 +110,12 @@ class Session:
         query: str | None = None,
         image: str | None = None,
         workdir: str | Path | None = None,
+        system_prompt: str | None = None,
+        parent_session_id: str | None = None,
+        name: str | None = None,
     ) -> "Session":
         resolved_workdir = normalize_workdir(workdir)
-        system_prompt = config.system_prompt(resolved_workdir)
+        prompt = config.system_prompt(resolved_workdir) if system_prompt is None else system_prompt
         session_id = _session_id()
         path = config.runtime.sessions_dir / session_id
         path.mkdir(parents=True, exist_ok=False)
@@ -97,6 +123,8 @@ class Session:
             SessionState(
                 session_id=session_id,
                 mode="exploration" if query is None and image is not None else "instruction",
+                parent_session_id=parent_session_id,
+                name=name,
                 query=query,
                 image=image,
                 workdir=resolved_workdir,
@@ -104,7 +132,7 @@ class Session:
             ),
             path,
         )
-        session.append({"role": "system", "content": system_prompt})
+        session.append({"role": "system", "content": prompt})
         session.save_state()
         return session
 
@@ -190,6 +218,114 @@ class Session:
 
     def add_error(self, error: ErrorInfo) -> None:
         self.state.errors.append(error)
+
+    def _update_execution_unlocked(
+        self,
+        status: ExecutionStatus,
+        *,
+        execution_id: str | None = None,
+        answer: str | None | object = _UNSET,
+        error: ErrorInfo | None | object = _UNSET,
+        started_at: str | None | object = _UNSET,
+        finished_at: str | None | object = _UNSET,
+        owner_pid: int | None | object = _UNSET,
+    ) -> ExecutionStatus:
+        """Update execution metadata while the session lock is held."""
+
+        current_id = self.state.execution_id
+        if execution_id is not None:
+            active = self.state.execution_status in ("queued", "running", "cancel_requested")
+            if current_id is not None and current_id != execution_id and active:
+                raise ValueError("execution_id_mismatch")
+            self.state.execution_id = execution_id
+            if current_id != execution_id and status == "queued":
+                # A completed execution may be replaced by a new turn for the
+                # same child session.
+                self.state.execution_answer = None
+                self.state.execution_error = None
+                self.state.execution_started_at = None
+                self.state.execution_finished_at = None
+                self.state.execution_owner_pid = None
+        self.state.execution_status = status
+        if answer is not _UNSET:
+            self.state.execution_answer = answer  # type: ignore[assignment]
+        if error is not _UNSET:
+            if isinstance(error, str):
+                error = ErrorInfo(code="background_error", message=error)
+            self.state.execution_error = error  # type: ignore[assignment]
+        if started_at is not _UNSET:
+            self.state.execution_started_at = (
+                None if started_at is None else str(started_at)
+            )
+        elif status == "running" and self.state.execution_started_at is None:
+            self.state.execution_started_at = utc_now()
+        if finished_at is not _UNSET:
+            self.state.execution_finished_at = (
+                None if finished_at is None else str(finished_at)
+            )
+        elif status in ("succeeded", "failed", "cancelled", "interrupted"):
+            self.state.execution_finished_at = utc_now()
+        if owner_pid is not _UNSET:
+            self.state.execution_owner_pid = owner_pid  # type: ignore[assignment]
+        return status
+
+    def update_execution(
+        self,
+        status: ExecutionStatus,
+        *,
+        execution_id: str | None = None,
+        answer: str | None | object = _UNSET,
+        error: ErrorInfo | None | object = _UNSET,
+        started_at: str | None | object = _UNSET,
+        finished_at: str | None | object = _UNSET,
+        owner_pid: int | None | object = _UNSET,
+    ) -> ExecutionStatus:
+        """Persist execution metadata using a fresh, locked session view."""
+
+        with self.locked():
+            return self._update_execution_unlocked(
+                status,
+                execution_id=execution_id,
+                answer=answer,
+                error=error,
+                started_at=started_at,
+                finished_at=finished_at,
+                owner_pid=owner_pid,
+            )
+
+    def _claim_execution_unlocked(self, execution_id: str) -> bool:
+        if self.state.execution_id != execution_id or self.state.execution_status != "queued":
+            return False
+        self._update_execution_unlocked(
+            "running",
+            execution_id=execution_id,
+            started_at=utc_now(),
+            finished_at=None,
+            owner_pid=os.getpid(),
+        )
+        return True
+
+    def claim_execution(self, execution_id: str) -> bool:
+        """Atomically claim a queued execution for the current process."""
+
+        with self.locked():
+            return self._claim_execution_unlocked(execution_id)
+
+    def _request_execution_cancel_unlocked(self, execution_id: str) -> ExecutionStatus:
+        if self.state.execution_id != execution_id:
+            raise ValueError("execution_id_mismatch")
+        status = self.state.execution_status
+        if status == "queued":
+            return self._update_execution_unlocked("cancelled", execution_id=execution_id)
+        if status == "running":
+            return self._update_execution_unlocked("cancel_requested", execution_id=execution_id)
+        return status
+
+    def request_execution_cancel(self, execution_id: str) -> ExecutionStatus:
+        """Request cooperative cancellation of a queued or running execution."""
+
+        with self.locked():
+            return self._request_execution_cancel_unlocked(execution_id)
 
     def _last_assistant_answer_unlocked(self) -> str | None:
         messages = self.ledger.messages()

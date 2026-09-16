@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .images import MAX_IMAGE_BYTES, inspect_local_image, sniff_mime
+from .redact import Redactor, redact_value
 from .trace import _json_safe
 
 __all__ = [
@@ -270,7 +271,9 @@ def image_ref_block_to_request(block: Mapping[str, Any]) -> dict[str, Any]:
     return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}}
 
 
-def assistant_turn(response: Any) -> tuple[dict[str, Any], list[tuple[str, str, Any]], str]:
+def assistant_turn(
+    response: Any, *, redactor: Redactor | None = None
+) -> tuple[dict[str, Any], list[tuple[str, str, Any]], str]:
     """Extract the persisted assistant message, its validated calls, and text."""
 
     choice = first_openai_choice(response)
@@ -292,5 +295,30 @@ def assistant_turn(response: Any) -> tuple[dict[str, Any], list[tuple[str, str, 
         assistant_message["role"] = "assistant"
     elif assistant_message.get("role") != "assistant":
         raise ValueError("response message had an invalid role")
+    if redactor is not None:
+        assistant_message = {
+            key: value if key == "tool_calls" else redact_value(value, redactor)
+            for key, value in assistant_message.items()
+        }
+        for call in assistant_message.get("tool_calls") or []:
+            # Call identities and function names must still match the raw
+            # calls executed below; only their argument payload is scrubbed.
+            for owner in (call, call.get("function")):
+                if not isinstance(owner, dict) or "arguments" not in owner:
+                    continue
+                arguments = owner["arguments"]
+                if isinstance(arguments, str):
+                    try:
+                        decoded = json.loads(arguments)
+                    except ValueError:
+                        # Keep malformed JSON malformed for the usual error
+                        # observation, removing only the configured secret.
+                        owner["arguments"] = redactor(arguments)
+                    else:
+                        owner["arguments"] = json.dumps(
+                            redact_value(_json_safe(decoded), redactor), ensure_ascii=False
+                        )
+                else:
+                    owner["arguments"] = redact_value(arguments, redactor)
     answer = extract_openai_text(field(assistant, "content"))
     return assistant_message, tool_calls, answer

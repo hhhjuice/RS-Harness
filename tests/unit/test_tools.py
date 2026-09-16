@@ -1,7 +1,10 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 from rs_harness.runtime.tools import (
+    SUB_TOOLS,
     TOOLS,
     dispatch_tool,
     run_bash,
@@ -9,6 +12,7 @@ from rs_harness.runtime.tools import (
     run_glob,
     run_read,
     run_read_image,
+    run_task,
     run_write,
     safe_path,
 )
@@ -19,8 +23,104 @@ JPEG = b"\xff\xd8\xff\xe0" + b"jpeg-payload"
 
 def test_tool_definitions_expose_all_workspace_tools():
     names = [item["function"]["name"] for item in TOOLS]
-    assert names == ["bash", "read_file", "write_file", "edit_file", "glob", "read_image", "todo_write"]
+    assert names == [
+        "bash", "read_file", "write_file", "edit_file", "glob",
+        "read_image", "todo_write", "task",
+    ]
     assert all(item["type"] == "function" for item in TOOLS)
+
+
+def test_sub_tools_exclude_delegation_so_depth_stays_one():
+    names = [item["function"]["name"] for item in SUB_TOOLS]
+    assert "task" not in names
+    assert names == [item["function"]["name"] for item in TOOLS if item["function"]["name"] != "task"]
+
+
+def test_run_task_without_runner_is_refused():
+    assert "requires an active parent agent loop" in run_task("do something", name="检查员")
+    assert "requires an active parent agent loop" in dispatch_tool(
+        "task", {"prompt": "do something", "name": "检查员"}, "/tmp"
+    )
+    assert "requires an active parent agent loop" in run_task("continue", session_id="child")
+    assert "requires an active parent agent loop" in run_task(action="close", session_id="child")
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        ({"prompt": "inspect", "name": "  影像检查员  "}, ("inspect", "run", None, "影像检查员", True, 0)),
+        ({"action": "run", "prompt": "continue", "session_id": "child-123"}, ("continue", "run", "child-123", None, True, 0)),
+        ({"action": "close", "session_id": "child-123"}, (None, "close", "child-123", None, True, 0)),
+        ({"action": "status", "session_id": "child-123"}, (None, "status", "child-123", None, True, 0)),
+        ({"action": "wait", "session_id": "child-123", "timeout_ms": 25}, (None, "wait", "child-123", None, True, 25)),
+        ({"prompt": "x" * 8000, "name": "n" * 64}, ("x" * 8000, "run", None, "n" * 64, True, 0)),
+    ],
+)
+def test_task_dispatches_valid_operations(arguments, expected):
+    calls = []
+
+    def runner(prompt, *, action, session_id, name, background, timeout_ms):
+        calls.append((prompt, action, session_id, name, background, timeout_ms))
+        return "task result"
+
+    assert dispatch_tool("task", arguments, "/tmp", task_runner=runner) == "task result"
+    assert calls == [expected]
+
+
+@pytest.mark.parametrize("prompt", [None, "", "  ", 123, [], "x" * 8001])
+def test_run_task_rejects_invalid_prompts_without_calling_runner(prompt):
+    def runner(*args, **kwargs):
+        pytest.fail("invalid prompt reached the runner")
+
+    assert run_task(prompt, runner, name="检查员").startswith("Error:")
+
+
+@pytest.mark.parametrize(
+    "name", [None, "", "  ", 123, [], "n" * 65, "two\nlines", "name\n", "\tname", "a\x00b", "a\x7fb", "a\u200bb"]
+)
+def test_run_task_rejects_invalid_names_without_calling_runner(name):
+    def runner(*args, **kwargs):
+        pytest.fail("invalid name reached the runner")
+
+    assert run_task("inspect", runner, name=name).startswith("Error:")
+
+
+@pytest.mark.parametrize("session_id", ["", " ", ".", "..", "../child", "/child", "a/b", "child/", "a b", "a\nb", "a\x00b", 123, []])
+def test_run_task_rejects_invalid_ids_without_creating_a_replacement(session_id):
+    def runner(*args, **kwargs):
+        pytest.fail("invalid session_id reached the runner")
+
+    assert "Invalid session_id" in run_task("continue", runner, session_id=session_id)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {},
+        {"action": "unknown"},
+        {"action": None},
+        {"action": []},
+        {"prompt": "inspect"},
+        {"prompt": "continue", "session_id": "child", "name": "new name"},
+        {"action": "close"},
+        {"action": "close", "session_id": "child", "prompt": ""},
+        {"action": "close", "session_id": "child", "name": ""},
+        {"prompt": "inspect", "name": "inspector", "extra": True},
+    ],
+)
+def test_task_rejects_invalid_argument_combinations(arguments):
+    def runner(*args, **kwargs):
+        pytest.fail("invalid arguments reached the runner")
+
+    assert dispatch_tool("task", arguments, task_runner=runner).startswith("Error:")
+
+
+def test_task_errors_and_large_results_remain_tool_observations():
+    def failing_runner(*args, **kwargs):
+        raise ValueError("failed to run child")
+
+    assert run_task("inspect", failing_runner, name="inspector") == "Error: failed to run child"
+    assert len(run_task("inspect", lambda *args, **kwargs: "x" * 60000, name="inspector")) == 50000
 
 
 def test_file_tools_write_read_and_edit_with_workspace_boundary(tmp_path: Path):

@@ -68,6 +68,52 @@ def test_system_prompt_rejects_empty_template(tmp_path):
         config.system_prompt("/tmp/workdir")
 
 
+def test_subagent_prompt_defaults_render_and_validate_the_same_way(tmp_path):
+    (tmp_path / "prompts").mkdir()
+    (tmp_path / "prompts" / "sub.md").write_text(
+        "sub\nWorking directory: {workdir}", encoding="utf-8"
+    )
+    config = Config(
+        model={"model": "gpt-test", "api_key_env": "TEST_RS_KEY"},
+        runtime={"subagent_system_prompt_file": tmp_path / "prompts" / "sub.md"},
+    )
+    assert config.subagent_system_prompt("/tmp/workdir") == "sub\nWorking directory: /tmp/workdir"
+
+    strict = Config(
+        model={"model": "gpt-test", "api_key_env": "TEST_RS_KEY"},
+        runtime={"subagent_system_prompt_file": tmp_path / "prompts" / "bad.md"},
+    )
+    (tmp_path / "prompts" / "bad.md").write_text("no placeholder", encoding="utf-8")
+    with pytest.raises(ConfigError, match="must contain"):
+        strict.subagent_system_prompt("/tmp/workdir")
+
+    missing = Config(
+        model={"model": "gpt-test", "api_key_env": "TEST_RS_KEY"},
+        runtime={"subagent_system_prompt_file": tmp_path / "prompts" / "missing.md"},
+    )
+    with pytest.raises(ConfigError, match="Unable to read subagent system prompt"):
+        missing.subagent_system_prompt("/tmp/workdir")
+
+
+def test_subagent_prompt_file_defaults_relative_to_config_toml(tmp_path):
+    (tmp_path / "prompts").mkdir()
+    (tmp_path / "prompts" / "subagent.md").write_text("sub {workdir}", encoding="utf-8")
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[model]
+model = "gpt-test"
+api_key_env = "TEST_RS_KEY"
+[runtime]
+sessions_dir = "sessions"
+""",
+        encoding="utf-8",
+    )
+    config = Config.load(config_file)
+    assert config.runtime.subagent_system_prompt_file == (tmp_path / "prompts" / "subagent.md").resolve()
+    assert "subagent_system_prompt_file" in config.summary()
+
+
 def test_provider_field_is_rejected():
     with pytest.raises(ValidationError):
         Config(
@@ -92,3 +138,32 @@ def test_loop_bash_timeout_defaults_to_120s_and_rejects_non_positive():
             model={"model": "gpt-test", "api_key_env": "TEST_RS_KEY"},
             loop={"bash_timeout_s": 0},
         )
+
+
+def test_background_subagent_limit_defaults_and_is_positive():
+    config = Config(model={"model": "gpt-test", "api_key_env": "TEST_RS_KEY"})
+    assert config.runtime.max_background_subagents == 4
+    assert config.summary()["max_background_subagents"] == 4
+    with pytest.raises(ValidationError):
+        Config(
+            model={"model": "gpt-test", "api_key_env": "TEST_RS_KEY"},
+            runtime={"max_background_subagents": 0},
+        )
+
+
+def test_background_subagent_limit_loads_from_toml(tmp_path):
+    (tmp_path / "prompts").mkdir()
+    (tmp_path / "prompts" / "system.md").write_text("system {workdir}", encoding="utf-8")
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+[model]
+model = "gpt-test"
+api_key_env = "TEST_RS_KEY"
+[runtime]
+max_background_subagents = 2
+""",
+        encoding="utf-8",
+    )
+    config = Config.load(config_file)
+    assert config.runtime.max_background_subagents == 2

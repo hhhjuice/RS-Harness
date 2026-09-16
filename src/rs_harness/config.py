@@ -74,7 +74,9 @@ class RuntimeConfig(BaseModel):
 
     sessions_dir: Path = Path("sessions")
     system_prompt_file: Path = Path("prompts/system.md")
+    subagent_system_prompt_file: Path = Path("prompts/subagent.md")
     dotenv_file: Path = Path(".env")
+    max_background_subagents: int = Field(default=4, gt=0)
 
 
 class Config(BaseModel):
@@ -111,8 +113,10 @@ class Config(BaseModel):
         base_dir = config_path.resolve().parent
         runtime.setdefault("sessions_dir", "sessions")
         runtime.setdefault("system_prompt_file", "prompts/system.md")
+        runtime.setdefault("subagent_system_prompt_file", "prompts/subagent.md")
         runtime.setdefault("dotenv_file", ".env")
-        for key in ("sessions_dir", "system_prompt_file", "dotenv_file"):
+        runtime.setdefault("max_background_subagents", 4)
+        for key in ("sessions_dir", "system_prompt_file", "subagent_system_prompt_file", "dotenv_file"):
             if not isinstance(runtime[key], str) or not runtime[key].strip():
                 raise ConfigError("config_error", f"runtime.{key} must be a non-empty path")
             candidate = Path(runtime[key]).expanduser()
@@ -139,7 +143,18 @@ class Config(BaseModel):
         return value
 
     def system_prompt(self, workdir: str) -> str:
-        prompt = self._read_prompt(self.runtime.system_prompt_file, "system prompt")
+        return self._render_prompt(
+            self._read_prompt(self.runtime.system_prompt_file, "system prompt"), workdir
+        )
+
+    def subagent_system_prompt(self, workdir: str) -> str:
+        return self._render_prompt(
+            self._read_prompt(self.runtime.subagent_system_prompt_file, "subagent system prompt"),
+            workdir,
+        )
+
+    @staticmethod
+    def _render_prompt(prompt: str, workdir: str) -> str:
         if not prompt.strip():
             raise ConfigError("config_error", "System prompt must not be empty")
         if "{workdir}" not in prompt:
@@ -167,7 +182,9 @@ class Config(BaseModel):
             "max_turns": self.loop.max_turns,
             "sessions_dir": str(self.runtime.sessions_dir),
             "system_prompt_file": str(self.runtime.system_prompt_file),
+            "subagent_system_prompt_file": str(self.runtime.subagent_system_prompt_file),
             "dotenv_file": str(self.runtime.dotenv_file),
+            "max_background_subagents": self.runtime.max_background_subagents,
         }
 
 

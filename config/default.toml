@@ -6,10 +6,12 @@ timeout_s = 60
 max_tokens = 4096
 
 [loop]
-max_turns = 20
+max_turns = 50
 bash_timeout_s = 120
 
 [runtime]
 sessions_dir = "../sessions"
 system_prompt_file = "../prompts/system.md"
+subagent_system_prompt_file = "../prompts/subagent.md"
 dotenv_file = "../.env"
+max_background_subagents = 4

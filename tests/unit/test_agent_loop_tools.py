@@ -1,10 +1,15 @@
 import base64
+import json
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 import rs_harness.agent_loop as agent_loop_module
 from rs_harness.agent_loop import InputRequest, create_session, run
 from rs_harness.config import Config
+from rs_harness.runtime.messages import assistant_turn
+from rs_harness.runtime.redact import secret_redactor
 from rs_harness.runtime.session import Session
 
 JPEG = b"\xff\xd8\xff\xe0" + b"jpeg-payload"
@@ -356,6 +361,74 @@ def test_tool_output_secrets_are_redacted_in_log_ledger_and_model_request(
     ledger = (session.path / "messages.jsonl").read_text(encoding="utf-8")
     assert "sk-live-test-secret" not in ledger
     assert "OPENAI_API_KEY=[REDACTED]" in ledger
+
+
+def test_assistant_argument_redaction_preserves_json_and_raw_execution_calls():
+    arguments = json.dumps({"name": "token=abc", "prompt": "inspect"})
+    response = _response(calls=[_call("token=abc", "task", arguments)])
+
+    message, calls, _ = assistant_turn(response, redactor=secret_redactor(""))
+
+    persisted_call = message["tool_calls"][0]
+    assert persisted_call["id"] == "token=abc"
+    assert json.loads(persisted_call["function"]["arguments"]) == {
+        "name": "token=[REDACTED]", "prompt": "inspect",
+    }
+    assert calls == [("token=abc", "task", arguments)]
+    assert response.choices[0].message.tool_calls[0].function.arguments == arguments
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [("token=abc", "token=[REDACTED]"), ("检查-sk-name-secret", "检查-[REDACTED]")],
+)
+def test_subagent_name_arguments_are_redacted_in_parent_ledger_and_history(
+    tmp_path: Path, monkeypatch, name, expected
+):
+    config = _config(tmp_path)
+    monkeypatch.setenv("UNUSED_RS_KEY", "sk-name-secret")
+    dispatched = []
+
+    def dispatch(tool_name, arguments, *args, **kwargs):
+        dispatched.append((tool_name, arguments))
+        return "delegated"
+
+    monkeypatch.setattr(agent_loop_module, "dispatch_tool", dispatch)
+    client = SequenceClient([
+        _response(calls=[_call("delegate", "task", json.dumps({"name": name, "prompt": "inspect"}))]),
+        _response("done"),
+    ])
+    session = create_session(config, workdir=tmp_path)
+
+    result = run(session.state.session_id, {"query": "delegate"}, config, openai_sdk_client=client)
+
+    assert result.status == "succeeded"
+    assert dispatched == [("task", {"name": name, "prompt": "inspect"})]
+    for messages in (Session.open(config, session.state.session_id).messages(), client.calls[1]["messages"]):
+        call = next(message["tool_calls"][0] for message in messages if message.get("tool_calls"))
+        assert call["id"] == "delegate"
+        assert json.loads(call["function"]["arguments"])["name"] == expected
+    assert "sk-name-secret" not in (session.path / "messages.jsonl").read_text(encoding="utf-8")
+
+
+def test_malformed_secret_arguments_still_produce_an_error_observation(tmp_path: Path, monkeypatch):
+    config = _config(tmp_path)
+    monkeypatch.setenv("UNUSED_RS_KEY", "sk-name-secret")
+    client = SequenceClient([
+        _response(calls=[_call("malformed", "task", '{"name": "sk-name-secret"')]),
+        _response("recovered"),
+    ])
+    session = create_session(config, workdir=tmp_path)
+
+    result = run(session.state.session_id, {"query": "delegate"}, config, openai_sdk_client=client)
+
+    assert result.status == "succeeded"
+    history = client.calls[1]["messages"]
+    call = next(message["tool_calls"][0] for message in history if message.get("tool_calls"))
+    assert call["id"] == "malformed"
+    assert call["function"]["arguments"] == '{"name": "[REDACTED]"'
+    assert "Invalid JSON arguments" in next(message["content"] for message in history if message["role"] == "tool")
+    assert "sk-name-secret" not in (session.path / "messages.jsonl").read_text(encoding="utf-8")
 
 
 def test_glob_tool_is_available_to_the_model_loop(tmp_path: Path):

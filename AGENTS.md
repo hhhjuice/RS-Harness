@@ -25,19 +25,22 @@ uv run rsh ask --config config/default.toml "问题"    # 单次请求
 - `src/rs_harness/cli.py` — Typer CLI（`ask` / `create-session` / `close-session` / `list-session`，无子命令时进交互模式）
 - `src/rs_harness/config.py` — TOML Config 加载与校验
 - `src/rs_harness/runtime/` — 会话与工具运行时：
-  - `session.py` 会话状态与生命周期；`tools.py` 七个工具与 `safe_path` 围栏；`hooks.py` HookRegistry 与权限回调；`messages.py` 消息构造与工具参数解码；`images.py` 图像附件；`todos.py` 任务规划状态；`trace.py` messages/events 双 JSONL 账本；`redact.py` 统一文本/结构脱敏（credential 键名与正则、data URI、secret 替换）
+  - `session.py` 会话状态与生命周期（`parent_session_id` 标记 task 委派产生的子会话，`name` 保存子代理身份）；`tools.py` 八个工具与 `safe_path` 围栏；`hooks.py` HookRegistry 与权限回调；`messages.py` 消息构造与工具参数解码；`images.py` 图像附件；`todos.py` 任务规划状态；`trace.py` messages/events 双 JSONL 账本；`redact.py` 统一文本/结构脱敏（credential 键名与正则、data URI、secret 替换）
 - `config/` — `default.toml`（实际运行）、`example.toml`（模板）
-- `prompts/system.md` — 系统提示词，必须包含 `{workdir}` 占位符
+- `prompts/system.md` — 系统提示词，必须包含 `{workdir}` 占位符；`prompts/subagent.md` — task 委派子代理提示词，同样必须含 `{workdir}`
 - `tests/unit/` — 按模块拆分的单测，不真实调用模型
-- `sessions/<session_id>/` — 运行时产物（`session.json` / `messages.jsonl` / `events.jsonl`），勿手动修改
+- `sessions/<session_id>/` — 运行时产物（`session.json` / `messages.jsonl` / `events.jsonl`），勿手动修改；task 委派产生的子会话是独立 `sessions/<id>/` 目录（`parent_session_id` 非空），保留名称、上下文与 todos，可按 ID 续聊，显式关闭或随父关闭，`list-session` 不显示
 - `workdir/` — 工具工作区示例目录
 
 ## 架构边界
 
 - 分层依赖方向固定：`cli → agent_loop → runtime`；`runtime` 只依赖 `..config` 和自身子模块，禁止反向 import。
 - 公共 API 经 `src/rs_harness/__init__.py` 显式导出。新增公共符号需同步 `__all__` 与 `runtime/__init__.py` 的再导出。
-- 循环只暴露七个工具：`bash` / `read_file` / `write_file` / `edit_file` / `glob` / `read_image` / `todo_write`。新工具要同时更新 `TOOLS` schema、`TOOL_HANDLERS` 与对应测试。
-- 文件工具路径受 `safe_path` 围栏限制在会话 workdir 内；越界必须经 `permission_callback` 批准且仅单次生效。硬拒绝的 Bash 模式不可批准。`todo_write` 只改会话规划状态，不需要路径审批。
+- 循环暴露八个工具：`bash` / `read_file` / `write_file` / `edit_file` / `glob` / `read_image` / `todo_write` / `task`。子代理会话只见 `SUB_TOOLS`（去掉 `task`，委派深度恒为 1）。新工具要同时更新 `_TOOL_SPECS` 与对应测试。
+- 文件工具路径受 `safe_path` 围栏限制在会话 workdir 内；越界必须经 `permission_callback` 批准且仅单次生效。硬拒绝的 Bash 模式不可批准。`todo_write` 只改会话规划状态，`task` 创建、续聊、后台查询或关闭当前父会话的直属子会话，均不需要路径审批。子代理工具调用与父同门同规（同一权限回调与 hooks）。
+- `task(name=..., prompt=...)` 默认后台新建具名子代理；`task(session_id=..., prompt=...)` 续聊；`task(action="status"|"wait"|"close", session_id=...)` 查询、等待或关闭。名称仅创建时设置，去首尾空白后 1–64 字符且无换行或控制字符，可重复，ID 为唯一定位依据。结果返回 ID、名称、execution 状态、会话状态和最终文本；父账本不复制子过程消息。
+- 后台子代理由 `runtime/background.py` 的进程内 daemon worker FIFO 调度，同时运行数受 `runtime.max_background_subagents` 限制（默认 4）。进程退出后未完成 execution 标记为 `interrupted`，子会话仍可按 ID 续跑。
+- 子代理单轮失败不关闭会话；终态不可重新启用，未配对历史工具调用不得重放。公共 `close_session` 先释放父锁再关闭直属子会话，重复关闭仍重试子清理；`Session.close()` 只处理单会话，`/quit`、`/exit` 保留父子会话。
 - 会话创建时绑定 workdir，恢复时不可更换。
 - **非必要不在 Agent Loop 内加功能：优先经 `HookRegistry` 在 `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `Stop` 四个生命周期点注册回调实现补充，保持 Loop 简洁。**
 

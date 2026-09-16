@@ -1,9 +1,13 @@
 import json
 from pathlib import Path
+from threading import Event, Thread
+from types import SimpleNamespace
 
 import pytest
 
 from rs_harness.runtime import Session
+from rs_harness.agent_loop import InputRequest, close_session, run
+from rs_harness.config import ConfigError
 
 
 def make_config(tmp_path: Path):
@@ -150,6 +154,291 @@ def test_old_session_without_workdir_remains_loadable(tmp_path):
     state_path.write_text(json.dumps(state), encoding="utf-8")
     reopened = Session.open(config, session.state.session_id)
     assert reopened.state.workdir is None
+
+
+def test_old_session_without_parent_session_id_is_a_root(tmp_path):
+    config = make_config(tmp_path)
+    session = Session.create(config)
+    state_path = session.path / "session.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state.pop("parent_session_id", None)
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    reopened = Session.open(config, session.state.session_id)
+    assert reopened.state.parent_session_id is None
+
+
+def test_subagent_name_is_persisted_and_root_name_is_optional(tmp_path):
+    config = make_config(tmp_path)
+    parent = Session.create(config)
+    child = Session.create(
+        config, parent_session_id=parent.state.session_id, name="影像元数据检查员"
+    )
+
+    reopened = Session.open(config, child.state.session_id)
+    assert reopened.state.name == "影像元数据检查员"
+    assert reopened.state.parent_session_id == parent.state.session_id
+    assert Session.open(config, parent.state.session_id).state.name is None
+    assert next(state for state in Session.list(config) if state.session_id == child.state.session_id).name == "影像元数据检查员"
+
+
+def test_old_session_without_name_remains_loadable_without_rewriting(tmp_path):
+    config = make_config(tmp_path)
+    session = Session.create(config, parent_session_id="old-parent")
+    state_path = session.path / "session.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state.pop("name")
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    original = state_path.read_bytes()
+
+    reopened = Session.open(config, session.state.session_id)
+
+    assert reopened.state.name is None
+    assert reopened.state.parent_session_id == "old-parent"
+    assert state_path.read_bytes() == original
+
+
+def test_execution_state_defaults_and_old_state_load(tmp_path):
+    config = make_config(tmp_path)
+    session = Session.create(config)
+    assert session.state.execution_status == "idle"
+    assert session.state.execution_id is None
+    state_path = session.path / "session.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    for key in (
+        "execution_status",
+        "execution_id",
+        "execution_answer",
+        "execution_error",
+        "execution_started_at",
+        "execution_finished_at",
+        "execution_owner_pid",
+    ):
+        state.pop(key, None)
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    reopened = Session.open(config, session.state.session_id)
+    assert reopened.state.execution_status == "idle"
+    assert reopened.state.execution_id is None
+
+
+def test_execution_claim_is_atomic_and_cancel_transitions(tmp_path):
+    config = make_config(tmp_path)
+    session = Session.create(config)
+    session.update_execution("queued", execution_id="exec-1")
+    first = Session.open(config, session.state.session_id)
+    second = Session.open(config, session.state.session_id)
+    assert first.claim_execution("exec-1") is True
+    assert second.claim_execution("exec-1") is False
+    assert Session.open(config, session.state.session_id).state.execution_status == "running"
+    assert first.request_execution_cancel("exec-1") == "cancel_requested"
+    assert Session.open(config, session.state.session_id).state.execution_status == "cancel_requested"
+    assert first.update_execution("cancelled", execution_id="exec-1") == "cancelled"
+    assert Session.open(config, session.state.session_id).state.execution_finished_at is not None
+
+
+def test_queued_execution_cancel_is_immediate(tmp_path):
+    config = make_config(tmp_path)
+    session = Session.create(config)
+    session.update_execution("queued", execution_id="exec-queued")
+    assert session.request_execution_cancel("exec-queued") == "cancelled"
+    reopened = Session.open(config, session.state.session_id)
+    assert reopened.state.execution_status == "cancelled"
+    assert reopened.state.execution_finished_at is not None
+
+
+def test_completed_child_can_queue_a_new_execution_id(tmp_path):
+    config = make_config(tmp_path)
+    session = Session.create(config)
+    session.update_execution("queued", execution_id="first")
+    session.claim_execution("first")
+    session.update_execution("succeeded", execution_id="first", answer="done")
+    session.update_execution("queued", execution_id="second")
+    reopened = Session.open(config, session.state.session_id)
+    assert reopened.state.execution_id == "second"
+    assert reopened.state.execution_status == "queued"
+    assert reopened.state.execution_answer is None
+    assert reopened.claim_execution("second") is True
+
+
+def test_public_close_closes_only_direct_children(tmp_path):
+    config = make_config(tmp_path)
+    parent = Session.create(config)
+    children = [
+        Session.create(config, parent_session_id=parent.state.session_id)
+        for _ in range(2)
+    ]
+    unrelated_parent = Session.create(config)
+    unrelated_child = Session.create(config, parent_session_id=unrelated_parent.state.session_id)
+    grandchild = Session.create(config, parent_session_id=children[0].state.session_id)
+
+    result = close_session(config, parent.state.session_id)
+
+    assert result.status == "closed"
+    for session in [parent, *children]:
+        assert Session.open(config, session.state.session_id).state.status == "closed"
+    for session in [unrelated_parent, unrelated_child, grandchild]:
+        assert Session.open(config, session.state.session_id).state.status == "running"
+
+
+@pytest.mark.parametrize("parent_status", ["closed", "failed"])
+def test_public_close_propagates_parent_status_and_preserves_terminal_children(tmp_path, parent_status):
+    config = make_config(tmp_path)
+    parent = Session.create(config)
+    active = Session.create(config, parent_session_id=parent.state.session_id)
+    terminal_children = [
+        Session.create(config, parent_session_id=parent.state.session_id)
+        for _ in range(2)
+    ]
+    terminal_children[0].close(status="closed", answer="completed", stop_reason="user_closed")
+    terminal_children[1].close(status="failed", answer="partial", stop_reason="old_failure")
+    original_states = [(child.path / "session.json").read_bytes() for child in terminal_children]
+
+    result = close_session(config, parent.state.session_id, status=parent_status)
+
+    assert result.status == parent_status
+    assert Session.open(config, active.state.session_id).state.status == parent_status
+    assert [(child.path / "session.json").read_bytes() for child in terminal_children] == original_states
+
+
+def test_public_close_finishes_other_children_and_retries_after_parent_closed(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    parent = Session.create(config)
+    children = [
+        Session.create(config, parent_session_id=parent.state.session_id)
+        for _ in range(3)
+    ]
+    failed_ids = {child.state.session_id for child in children[:2]}
+    original_close = Session.close
+
+    def interrupted_close(self, *args, **kwargs):
+        if self.state.session_id in failed_ids:
+            raise OSError("temporary child close failure")
+        return original_close(self, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "close", interrupted_close)
+
+    with pytest.raises(ConfigError) as caught:
+        close_session(config, parent.state.session_id)
+
+    assert caught.value.code == "subagent_close_failed"
+    assert all(session_id in caught.value.message for session_id in failed_ids)
+    assert "temporary child close failure" in caught.value.message
+    assert Session.open(config, parent.state.session_id).state.status == "closed"
+    assert Session.open(config, children[2].state.session_id).state.status == "closed"
+    assert all(Session.open(config, session_id).state.status == "running" for session_id in failed_ids)
+
+    failed_ids.clear()
+    assert close_session(config, parent.state.session_id).status == "closed"
+    assert all(Session.open(config, child.state.session_id).state.status == "closed" for child in children)
+
+
+def test_public_close_waits_for_delegation_then_closes_parent_and_child(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    sub_prompt = tmp_path / "subagent.md"
+    sub_prompt.write_text("Subagent working in {workdir}", encoding="utf-8")
+    config = config.model_copy(update={
+        "runtime": config.runtime.model_copy(update={"subagent_system_prompt_file": sub_prompt}),
+    })
+    parent = Session.create(config, workdir=tmp_path)
+    child_started = Event()
+    release_child = Event()
+    close_started = Event()
+    close_done = Event()
+    outcomes = {}
+
+    class BlockingClient:
+        def __init__(self):
+            self.chat = self
+            self.completions = self
+            self.calls = 0
+
+        def create(self, **kwargs):
+            self.calls += 1
+            calls = []
+            content = "parent done"
+            if self.calls == 1:
+                content = None
+                calls = [SimpleNamespace(
+                    id="delegate", type="function",
+                    function=SimpleNamespace(
+                        name="task", arguments=json.dumps({"name": "检查员", "prompt": "inspect"}),
+                    ),
+                )]
+            elif self.calls == 2:
+                child_started.set()
+                assert release_child.wait(5), "child was not released"
+                content = "child done"
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(role="assistant", content=content, tool_calls=calls),
+            )])
+
+    client = BlockingClient()
+    original_close = Session.close
+
+    def observed_close(self, *args, **kwargs):
+        if self.state.session_id == parent.state.session_id:
+            close_started.set()
+        return original_close(self, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "close", observed_close)
+
+    def interact():
+        try:
+            outcomes["run"] = run(
+                parent.state.session_id, InputRequest(query="delegate"), config,
+                openai_sdk_client=client,
+            )
+        except Exception as exc:
+            outcomes["run"] = exc
+
+    def close():
+        try:
+            outcomes["close"] = close_session(config, parent.state.session_id)
+        except Exception as exc:
+            outcomes["close"] = exc
+        finally:
+            close_done.set()
+
+    interaction = Thread(target=interact, daemon=True)
+    closer = Thread(target=close, daemon=True)
+    interaction.start()
+    try:
+        assert child_started.wait(5), "delegation did not start"
+        closer.start()
+        assert close_started.wait(5), "close did not start"
+        assert not close_done.wait(0.1), "close must wait for the active parent interaction"
+    finally:
+        release_child.set()
+        interaction.join(timeout=5)
+        if closer.ident is not None:
+            closer.join(timeout=5)
+
+    assert not interaction.is_alive() and not closer.is_alive(), "close and delegation deadlocked"
+    assert not isinstance(outcomes["run"], Exception), outcomes["run"]
+    assert not isinstance(outcomes["close"], Exception), outcomes["close"]
+    assert outcomes["run"].status == "succeeded"
+    assert outcomes["close"].status == "closed"
+    states = Session.list(config)
+    assert len(states) == 2
+    assert all(state.status == "closed" for state in states)
+    child = next(state for state in states if state.parent_session_id == parent.state.session_id)
+    assert child.name == "检查员"
+
+
+def test_create_accepts_custom_system_prompt_and_parent_link(tmp_path):
+    config = make_config(tmp_path)
+    parent = Session.create(config)
+    # The override is the final rendered text; placeholder rendering is the
+    # caller's job (agent_loop passes config.subagent_system_prompt(workdir)).
+    child = Session.create(
+        config,
+        query="subtask",
+        system_prompt="child prompt",
+        parent_session_id=parent.state.session_id,
+    )
+    assert child.messages()[0] == {"role": "system", "content": "child prompt"}
+    assert child.state.parent_session_id == parent.state.session_id
+    # Without an override the configured prompt stays in charge.
+    assert Session.create(config).messages()[0]["content"].startswith("system")
 
 
 def test_messages_returns_fresh_list_shell(tmp_path):

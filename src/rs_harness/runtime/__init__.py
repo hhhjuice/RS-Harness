@@ -1,6 +1,6 @@
 """Runtime state and persistent message contexts."""
 
-from .session import ErrorInfo, InteractionResult, Session, SessionResult, SessionState
+from .session import ErrorInfo, ExecutionStatus, InteractionResult, Session, SessionResult, SessionState, SessionStatus
 from .trace import EventLedger, MessageLedger
 from .todos import TodoItem, TodoManager, run_todo_write
 from .hooks import (
@@ -18,6 +18,7 @@ from .hooks import (
 )
 from .tools import (
     TOOLS,
+    SUB_TOOLS,
     TOOL_HANDLERS,
     dispatch_tool,
     normalize_workdir,
@@ -26,12 +27,21 @@ from .tools import (
     run_glob,
     run_read,
     run_read_image,
+    run_task,
     run_write,
     safe_path,
+)
+from .background import (
+    BackgroundTaskManager,
+    CONSOLE_LOCK,
+    TaskSnapshot,
+    get_background_task_manager,
 )
 
 __all__ = [
     "ErrorInfo",
+    "ExecutionStatus",
+    "SessionStatus",
     "InteractionResult",
     "MessageLedger",
     "EventLedger",
@@ -53,6 +63,7 @@ __all__ = [
     "todo_display_hook",
     "tool_error_hook",
     "TOOLS",
+    "SUB_TOOLS",
     "TOOL_HANDLERS",
     "dispatch_tool",
     "normalize_workdir",
@@ -63,4 +74,9 @@ __all__ = [
     "run_edit",
     "run_glob",
     "run_read_image",
+    "run_task",
+    "BackgroundTaskManager",
+    "CONSOLE_LOCK",
+    "TaskSnapshot",
+    "get_background_task_manager",
 ]
