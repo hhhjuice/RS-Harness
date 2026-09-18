@@ -1,4 +1,4 @@
-"""Validated configuration loading for the v0.0.1 harness."""
+"""Validated configuration loading for the v0.0.2 harness."""
 
 from __future__ import annotations
 
@@ -50,6 +50,7 @@ class RuntimeConfig(BaseModel):
     sessions_dir: Path = Path("sessions")
     system_prompt_file: Path = Path("prompts/system.md")
     checkpoint_file: Path = Path("checkpoints.sqlite3")
+    max_model_calls: int = Field(default=10, gt=0, strict=True)
 
 
 class Config(BaseModel):
@@ -123,6 +124,7 @@ class Config(BaseModel):
             "sessions_dir": str(self.runtime.sessions_dir),
             "checkpoint_file": str(self.runtime.checkpoint_file),
             "system_prompt_file": str(self.runtime.system_prompt_file),
+            "max_model_calls": self.runtime.max_model_calls,
         }
 
 

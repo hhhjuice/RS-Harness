@@ -9,3 +9,4 @@ max_tokens = 4096
 sessions_dir = "../sessions"
 system_prompt_file = "../prompts/system.md"
 checkpoint_file = "checkpoints.sqlite3"
+max_model_calls = 10

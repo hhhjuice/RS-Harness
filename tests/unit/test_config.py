@@ -9,6 +9,55 @@ def test_config_resolves_paths_and_prompt(config):
     assert config.runtime.sessions_dir.is_dir() is False
     assert config.system_prompt("/tmp/work") == "You are a test assistant. Workspace: /tmp/work"
     assert config.runtime.checkpoint_file == config.runtime.sessions_dir / "checkpoints.sqlite3"
+    assert config.runtime.max_model_calls == 10
+    assert config.summary()["max_model_calls"] == 10
+
+
+@pytest.mark.parametrize("rendered", ["0", "-1", "true", "false", "1.0", "1.5", '"10"'])
+def test_max_model_calls_must_be_a_positive_integer(tmp_path, rendered):
+    prompt = tmp_path / "system.md"
+    prompt.write_text("test", encoding="utf-8")
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[model]",
+                'model = "test-model"',
+                'api_key = "test-key"',
+                "",
+                "[runtime]",
+                f'max_model_calls = {rendered}',
+                f'system_prompt_file = "{prompt}"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="Invalid Config") as error:
+        Config.load(config_path)
+    assert "runtime.max_model_calls" in str(error.value)
+
+
+def test_max_model_calls_can_be_configured(config, tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[model]",
+                'model = "test-model"',
+                'api_key = "test-key"',
+                "",
+                "[runtime]",
+                "max_model_calls = 3",
+                f'sessions_dir = "{config.runtime.sessions_dir}"',
+                f'system_prompt_file = "{config.runtime.system_prompt_file}"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = Config.load(config_path)
+    assert loaded.runtime.max_model_calls == 3
 
 
 def test_api_key_comes_from_toml(config, monkeypatch):

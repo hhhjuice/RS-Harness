@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
+from ..agents.middleware import build_middleware
 from ..config import Config
+
+
+@dataclass(frozen=True)
+class AgentContext:
+    """Per-invocation runtime dependencies kept outside Agent state."""
+
+    workdir: str
 
 
 def build_agent(
@@ -33,5 +42,7 @@ def build_agent(
         model=model,
         tools=[],
         system_prompt=config.system_prompt(workdir),
+        middleware=build_middleware(config),
+        context_schema=AgentContext,
         checkpointer=checkpointer,
     )

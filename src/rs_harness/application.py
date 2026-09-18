@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .agents.main import build_agent
+from .agents.main import AgentContext, build_agent
 from .config import Config
 from .inputs import build_human_message, extract_answer
 from .sessions.catalog import Session, SessionCatalog, SessionError
@@ -78,6 +78,7 @@ async def ask(
                             },
                             "run_name": "rsh_agent",
                         },
+                        context=AgentContext(workdir=session.meta.workdir),
                     )
                 answer = extract_answer(result)
             except Exception as exc:
