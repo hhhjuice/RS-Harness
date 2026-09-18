@@ -1,0 +1,11 @@
+.DS_Store
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.env
+/config/default.toml
+/sessions/
+*.egg-info/
+*.py[cod]

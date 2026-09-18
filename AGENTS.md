@@ -1,0 +1,4 @@
+- 旧的 RS-Harness 项目已被存放到 /Users/hgz/WorkSpace/Projects/RS-Harness，当前的 RS-Harness 项目准备使用 [LangChain](https://docs.langchain.com/oss/python/langchain/overview) 框架重新搭建
+- docs 目录存放项目相关的设计和说明文档
+- 当前 RS-Harness 项目处于开发阶段，任何功能的修改或增加都不需要考虑旧会话的维护
+- 该项目使用的数据集在/Users/hgz/WorkSpace/Datasets

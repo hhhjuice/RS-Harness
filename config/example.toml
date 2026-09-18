@@ -1,0 +1,11 @@
+[model]
+model = "gpt-4o-mini"
+base_url = ""
+api_key = ""
+timeout_s = 60
+max_tokens = 4096
+
+[runtime]
+sessions_dir = "../sessions"
+system_prompt_file = "../prompts/system.md"
+checkpoint_file = "checkpoints.sqlite3"
