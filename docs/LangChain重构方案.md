@@ -1,6 +1,6 @@
 # RS-Harness LangChain 重构方案
 
-日期：2026-09-18｜状态：阶段 1—3 已完成，v0.0.3 离线回归 134 项、真实模型验收 6 项通过；阶段 4—6 尚未实现
+日期：2026-09-20｜状态：阶段 1—4 已完成，v0.0.4 共确认离线测试 281 项、真实模型验收 12 项通过；阶段 5—6 尚未实现
 
 ## 1. 目标与范围
 
@@ -26,7 +26,7 @@
 | 工具执行         | `create_agent` 默认工具执行机制                      | 接受同一响应中的多个工具调用，不保证调用间顺序                                |
 | 任务规划         | `TodoListMiddleware` / `write_todos`               | 使用官方规划状态和提示，不复制旧 Todo 限制及提醒逻辑                          |
 | Hooks            | `AgentMiddleware` 的 node/wrap hooks                 | 直接使用官方生命周期扩展点，不保留旧 HookRegistry 协议                        |
-| Permission       | `HumanInTheLoopMiddleware` + `Command(resume=...)` | 工具审批、中断及恢复由官方机制承载                                            |
+| Permission       | `AgentMiddleware` + 条件 `HumanInTheLoopMiddleware` + `Command(resume=...)` | 硬拒绝、危险操作审批与普通操作直通；中断及恢复由官方机制承载 |
 | 多模态输入       | `HumanMessage` 与标准 content blocks                 | 图片作为消息输入，不依赖`read_image` 或自定义图片引用协议                   |
 | SubAgent         | 子`create_agent` 包装为 `@tool`，注册到主 Agent    | 主 Agent 决定委派，子 Agent 默认每次调用使用独立上下文                        |
 | 多轮上下文       | LangGraph 持久 Checkpointer +`thread_id`             | 框架维护 messages、todos 和中断状态，RSH 不自行读写历史消息列表               |
@@ -90,9 +90,11 @@ LangChain 负责 Agent 执行、工具调用和生命周期扩展，LangGraph �
 
 ### 4.3 Permission 与人工审批
 
-- 使用 `HumanInTheLoopMiddleware(interrupt_on=...)` 配置需要审批的工具。首版可将 Bash、写入和编辑设为审批动作，读取与 glob 在工作目录规则允许时直接执行。
-- 文件工具保留工作目录边界检查；首版越界直接返回工具错误。权限与工具逻辑保持简单，不迁移旧危险命令子串清单及单次越界授权系统。
-- CLI 展示官方中断中的动作与参数，提供 `approve/reject`。以相同 `thread_id` 提交 `Command(resume={"decisions": ...})`，不重新提交原始用户消息。
+- 参考用户提供的 s03 Permission 文档和代码，按 `deny → ask → allow` 判定每次调用。工作目录内的读写编辑、glob 和未命中风险规则的 Bash 直接执行，只有命中危险操作规则的调用需要审批；具体规则见第四阶段实施方案。
+- 使用官方 `HumanInTheLoopMiddleware(interrupt_on=...)` 的 `when` 谓词，根据工具参数和可信 runtime context 选择 ask 项。危险 Bash（如普通 rm）及工作目录外的 read/write/edit 进入审批；仅允许 approve/reject。
+- Bash 硬拒绝清单优先于询问规则，命中时不提供批准选项。通过小型 `AgentMiddleware.awrap_tool_call` 返回带原 tool_call_id 的错误 ToolMessage，不执行 handler；不自建 Agent Loop 或工具分发器。参考子串规则不是完整 Shell 安全隔离。
+- 文件工具继续解析路径、检查文件类型和参数；工作目录外访问由条件审批决定，批准后允许当前调用执行，不能再无条件报越界错误。区内结果保留相对路径，区外返回解析后的绝对路径；glob 仍限制在工作区。授权不进入模型可传参数，也不另存永久许可或审批账本。
+- CLI 交互只展示待审工具及其操作，使用 `yes/no` 映射为官方的 `approve/reject`；文件驱动接口仍提交官方决定对象。以相同 `thread_id` 提交 `Command(resume={"decisions": ...})`，不重新提交原始用户消息。
 - 同一中断含多个待审动作时，为每个动作提供一个 decision，顺序与官方 `action_requests` 一致；多个中断按官方 interrupt ID 路由，不假定只有一个待审批调用。
 - 待审批信息和暂停位置由 Checkpointer 保存，不另外维护审批账本或授权状态副本。无交互终端时返回待审批状态，由后续命令恢复；同一会话待审批期间不接受新的普通交互。
 - SubAgent 中的审批按官方嵌套调用中断机制传递到调用方，具体恢复接口在第六阶段验证；不为子 Agent 新建独立审批服务。
@@ -212,7 +214,7 @@ RS-Harness/
 | 1. 基本 Loop 对话与 session 记录 | 锁定 LangChain/LangGraph 依赖；创建无工具`create_agent`；接入持久 Checkpointer、`thread_id`、session 元数据、CLI 入口和 callback 运行记录 | 文本单轮、多轮和重启续聊成功；同 thread 保留上下文、不同 thread 隔离；输入、回答、失败和模型调用记录可查看，记录不参与上下文恢复 |
 | 2.`AgentMiddleware` 扩展       | 建立官方 middleware 组合入口，接入`ModelCallLimitMiddleware`；按需使用 node/wrap hooks，明确 runtime context 注入方式                       | 用测试模型和最小测试工具验证钩子顺序、状态更新及调用预算；已有对话、记忆和记录不受影响；不提前实现 Permission 或 Todo            |
 | 3. 五种基础工具接入与多模态输入  | 以`@tool` 接入 `read_file/write_file/edit_file/glob/bash`；补充 `wrap_tool_call` 错误处理及工具轨迹；标准内容块接收本地/URL图片         | 默认多工具调用正常工作；路径检查、Bash超时和工具错误反馈生效；文本+图片、仅图片输入可用，多模态会话可恢复                        |
-| 4. Permission 机制               | 对已接入工具配置`HumanInTheLoopMiddleware`；使用既有 Checkpointer 保存中断；CLI通过 `Command(resume=...)` 批准或拒绝，记录恢复结果        | 审批前工具不执行；多 action decision 顺序正确；同 thread 可跨进程恢复；待审批状态不接受新的普通输入；错误处理中断不被吞掉        |
+| 4. Permission 机制               | 实现 deny/ask/allow 规则；用官方 wrap hook 硬拒绝、HITL when 条件审批；调整越界文件访问；复用 Checkpointer 与 CLI Command 恢复并记录结果 | 普通操作直通，硬拒绝不执行，危险操作批准前不执行、批准后可执行；多 action/interrupt 正确对应；跨进程恢复；待审时禁止普通输入，中断不被吞掉 |
 | 5. 任务规划能力                  | 接入`TodoListMiddleware` 与官方 `write_todos`；将规划状态纳入主 Agent State                                                               | 任务可创建、更新、完成和恢复；规划只表达状态，不直接执行任务；非法输入不会破坏已有状态                                           |
 | 6. SubAgent 能力                 | 创建职责明确的子`create_agent`，用 `@tool` 注册到主 Agent；按官方调用级上下文隔离传递输入，复用工具及审批配置；补齐嵌套callback记录       | 主 Agent 能委派并综合结果；独立调用默认不共享子历史；嵌套审批可恢复；子调用轨迹可关联且不回灌主上下文；第6节整体验收通过         |
 
@@ -222,6 +224,7 @@ RS-Harness/
 - 第二阶段提供扩展方式，不提前实现后续能力。Permission 和任务规划都是官方 middleware 的具体应用，分别在第四、第五阶段接入。
 - 第二阶段的具体改动、接口约定与验收矩阵及实施记录见 [`v0.0.2——AgentMiddleware 扩展.md`](./v0.0.2——AgentMiddleware%20扩展.md)；审查问题已修复，开发完成，离线回归 62 项通过；真实模型冒烟此前连接失败，本次联网复验因自动审批服务 503 未执行。
 - 第三阶段的工具契约、多模态入口、验收矩阵和实施记录见 [`v0.0.3——五种基础工具接入与多模态输入.md`](./v0.0.3——五种基础工具接入与多模态输入.md)；五工具、轨迹、本地/URL 图片及恢复已实现，离线回归 134 项、真实模型 6 项通过，含阶段二能力在当前版本的三轮文本复验。
+- 第四阶段的审批策略、应用与 CLI 契约、实施步骤及验收矩阵见 [`v0.0.4——Permission 机制.md`](./v0.0.4——Permission%20机制.md)；危险操作条件审批、硬拒绝、外部文件授权、CLI 查询及恢复已实现，共确认离线测试 281 项、DeepSeek Flash 真实模型验收 12 项通过，含既有能力复验。
 - 第三阶段在临时工作目录中验证工具；第四阶段完成面向用户的人工审批流程，不为开发阶段增加绕过审批的运行开关。
 - 任务规划本身不强依赖 Permission，仍按给定顺序独立验收；SubAgent 放在最后，以复用已经验证的工具、middleware、审批和记录机制。
 
@@ -235,7 +238,7 @@ RS-Harness/
 | 默认工具执行     | 一次模型响应中的多个独立工具调用均由框架处理并正确配对；没有人为串行化或整批拒绝，不断言工具完成顺序               |
 | 基础工具         | 五种工具按参数执行；路径与参数校验生效；Bash 超时能够结束进程；错误反馈可供模型修正                                |
 | Middleware/Todo  | 官方生命周期扩展生效，工具错误处理不吞中断；规划状态可更新并随主会话恢复；模型调用预算生效                         |
-| Permission       | 需审批工具在批准前不执行；批准执行、拒绝反馈；多动作 decisions 正确对应；待审批时普通交互被拒                      |
+| Permission       | 普通操作直接执行；硬拒绝不执行且不可批准；危险操作在批准前不执行，批准后可执行（含越界文件访问）、拒绝反馈；多动作对应正确；待审时拒绝普通输入 |
 | 审批恢复         | 重启后以同 thread 恢复官方中断；沿用暂停状态，不把原请求重新当作新交互提交                                         |
 | 记忆归属         | 同thread第二轮只提交新消息仍能使用第一轮信息；新进程复用SQLite可续聊；不同thread不共享上下文                       |
 | 交互与轨迹       | 记录输入、回答、模型/工具调用及错误；子调用可按run/parent关联；审批恢复关联原交互；不新增持久子会话                |
@@ -260,4 +263,4 @@ RS-Harness/
 - [Subagents](https://docs.langchain.com/oss/python/langchain/multi-agent/subagents)：子Agent作为工具、默认调用级上下文隔离及继承Checkpointer。
 - [Short-term memory](https://docs.langchain.com/oss/python/langchain/short-term-memory)、[Persistence](https://docs.langchain.com/oss/python/langgraph/persistence)：框架维护同thread上下文，Checkpointer与跨thread Store职责不同；SQLite异步接线在第一阶段验证。
 
-阶段 1 已完成基本对话、会话与持久化；阶段 2 已完成 middleware、预算和 runtime context，相关能力已随 v0.0.3 联网复验。阶段 3 已实现五工具、官方工具错误处理、工具 callback 和标准多模态输入；已用 DeepSeek Flash 验证真实工具链路、文本+图片、仅图片、URL 图片及跨进程恢复。callback 签名和多模态序列化以第三阶段实施记录中的锁定版本验证为准。阶段 4—6 仍待实施：审批恢复在第四阶段验证，嵌套中断与子调用 callback 在第六阶段验证。记录器继续只做轻量本地适配，不扩展为旧 RSH 上下文引擎或审计系统。
+阶段 1 已完成基本对话、会话与持久化；阶段 2 已完成 middleware、预算和 runtime context。阶段 3 已实现五工具、官方工具错误处理、工具 callback 和标准多模态输入。阶段 4 已实现条件审批与跨进程恢复，当前版本已用 DeepSeek Flash 复验真实工具、文本、图片、危险 Bash 和外部文件批准/拒绝。callback 签名和多模态序列化以第三阶段实施记录中的锁定版本验证为准；预算按每次 ainvoke 执行段限制，恢复获得新预算。阶段 5—6 仍待实施，嵌套中断与子调用 callback 在第六阶段验证。记录器继续只做轻量本地适配，不扩展为旧 RSH 上下文引擎或审计系统。

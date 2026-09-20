@@ -4,12 +4,13 @@ from types import SimpleNamespace
 
 import pytest
 from langchain.agents import create_agent
+from langchain.agents.middleware import ToolErrorMiddleware
 from langchain.tools import tool
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.errors import GraphInterrupt
 
-from rs_harness.agents.middleware import build_middleware
-from rs_harness.application import ask, create_session
+from rs_harness.agents.middleware import ToolDenyMiddleware, build_middleware
+from rs_harness.application import ask, create_session, resume
 from tests.models import ScriptedModel
 
 
@@ -56,6 +57,10 @@ async def test_parameter_errors_path_errors_and_runtime_cannot_be_forged(config,
         AIMessage(content="recovered"),
     ])
     result = await ask(config, session.session_id, "run", model=model)
+    assert result.status == "interrupted", result.error
+    result = await resume(config, session.session_id, {
+        result.interrupts[0]["id"]: {"decisions": [{"type": "reject", "message": "outside"}]},
+    }, model=model)
     assert result.status == "succeeded", result.error
     assert (tmp_path / "note.txt").read_text() == "fixed"
     messages = {message.tool_call_id: message for message in model.inputs[-1] if isinstance(message, ToolMessage)}
@@ -63,7 +68,7 @@ async def test_parameter_errors_path_errors_and_runtime_cannot_be_forged(config,
     assert "outside" in messages["outside"].content
     assert messages["fixed"].status == "success"
     events = [json.loads(line) for line in session.trajectory_path.read_text().splitlines()]
-    assert len([event for event in events if event["event"] == "tool_error"]) == 2
+    assert len([event for event in events if event["event"] == "tool_error"]) == 1
     assert len([event for event in events if event["event"] == "tool_end"]) == 1
 
 
@@ -115,13 +120,13 @@ async def test_default_async_calls_can_overlap(config):
 
 @pytest.mark.parametrize("error", [RuntimeError("bug"), asyncio.CancelledError(), GraphInterrupt(())])
 async def test_unexpected_errors_and_control_flow_are_not_converted(config, error):
-    middleware = build_middleware(config)[1]
-
     async def handler(request):
         raise error
 
-    with pytest.raises(type(error)):
-        await middleware.awrap_tool_call(SimpleNamespace(tool=None, tool_call={"name": "probe", "id": "probe"}), handler)
+    for middleware in build_middleware(config):
+        if isinstance(middleware, (ToolErrorMiddleware, ToolDenyMiddleware)):
+            with pytest.raises(type(error)):
+                await middleware.awrap_tool_call(SimpleNamespace(tool=None, tool_call={"name": "probe", "id": "probe"}), handler)
 
 
 async def test_recording_failure_does_not_repeat_side_effect(config, tmp_path):

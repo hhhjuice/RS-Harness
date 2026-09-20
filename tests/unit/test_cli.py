@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -61,6 +62,18 @@ def test_invalid_image_json_creates_no_session(config, tmp_path):
     assert SessionCatalog.list(config) == []
 
 
+def test_print_action_escapes_bash_control_characters(capsys):
+    from rs_harness import cli
+
+    cli._print_action({"name": "bash", "args": {"command": "printf '\x1b]52;c;secret\x07\n'"}})
+
+    output = capsys.readouterr().err
+    assert "\x1b" not in output
+    assert "\\u001b" in output
+    assert "\\u0007" in output
+    assert "\\n" in output
+
+
 def test_cli_image_only_and_resume_keep_workdir(config, tmp_path, monkeypatch):
     from langchain_core.messages import AIMessage
     from rs_harness import application, cli
@@ -91,3 +104,111 @@ def test_cli_image_only_and_resume_keep_workdir(config, tmp_path, monkeypatch):
     changed_workdir = CliRunner().invoke(app, ["ask", "hello", *options, "--session-id", session_id, "--workdir", str(tmp_path)])
     assert changed_workdir.exit_code == 1
     assert "session_workdir_mismatch" in json.loads(changed_workdir.stdout)["error"]["message"]
+
+
+@pytest.mark.parametrize("document", [
+    "{", '{"id":{},"id":{}}', '{"id":{"decisions":[{"type":"approve","type":"reject"}]}}',
+    'null', '[]', '{"old":{"decisions":[{"type":"edit"}]}}',
+])
+def test_resume_rejects_invalid_json_without_mutating_pending(config, tmp_path, document):
+    from langchain_core.messages import AIMessage
+    from rs_harness import application
+    from tests.models import ScriptedModel
+
+    session = application.create_session(config, workdir=str(tmp_path))
+    model = ScriptedModel([AIMessage(content="", tool_calls=[{
+        "name": "bash", "args": {"command": "rm file.txt"}, "id": "delete", "type": "tool_call",
+    }])])
+    pending = asyncio.run(application.ask(config, session.session_id, "run", model=model))
+    assert pending.status == "interrupted"
+    before = session.trajectory_path.read_bytes()
+    path = tmp_path / "decisions.json"
+    path.write_text(document)
+    result = CliRunner().invoke(app, [
+        "resume", "--config", str(tmp_path / "config.toml"), "--session-id", session.session_id,
+        "--decisions-file", str(path), "--json",
+    ])
+    assert result.exit_code == 1, result.output
+    assert json.loads(result.stdout)["error"]["type"] == "invalid_approval_decisions"
+    assert result.stderr == ""
+    assert session.trajectory_path.read_bytes() == before
+    assert asyncio.run(application.get_pending_approvals(config, session.session_id, model=model)).interrupts == pending.interrupts
+
+
+@pytest.mark.parametrize("already_pending", [False, True])
+def test_pipe_never_consumes_next_line_as_approval(config, tmp_path, monkeypatch, already_pending):
+    from langchain_core.messages import AIMessage
+    from rs_harness import application, cli
+    from tests.models import ScriptedModel
+
+    session = application.create_session(config, workdir=str(tmp_path))
+    (tmp_path / "file.txt").write_text("keep")
+    model = ScriptedModel([AIMessage(content="", tool_calls=[{
+        "name": "bash", "args": {"command": "rm file.txt"}, "id": "delete", "type": "tool_call",
+    }])])
+    async def ask_with_model(config, session_id, text):
+        return await application.ask(config, session_id, text, model=model)
+    monkeypatch.setattr(cli, "ask", ask_with_model)
+    if already_pending:
+        asyncio.run(ask_with_model(config, session.session_id, "run"))
+    result = CliRunner().invoke(app, [
+        "--config", str(tmp_path / "config.toml"), "--session-id", session.session_id,
+    ], input="run\nyes\n/close\n")
+    assert result.exit_code == 2, result.output
+    assert "Action 1:" not in result.output
+    assert "rm file.txt" in result.stderr
+    assert (tmp_path / "file.txt").read_text() == "keep"
+    assert model.call_count == 1
+    assert SessionCatalog.open(config, session.session_id).meta.status == "running"
+
+
+def test_ask_json_reports_pending_gate(config, tmp_path, monkeypatch):
+    from langchain_core.messages import AIMessage
+    from rs_harness import application, cli
+    from tests.models import ScriptedModel
+
+    model = ScriptedModel([AIMessage(content="", tool_calls=[{
+        "name": "bash", "args": {"command": "rm file.txt"}, "id": "delete", "type": "tool_call",
+    }])])
+    async def ask_with_model(config, session_id, text):
+        return await application.ask(config, session_id, text, model=model)
+    monkeypatch.setattr(cli, "ask", ask_with_model)
+    options = ["--config", str(tmp_path / "config.toml"), "--json"]
+    first = CliRunner().invoke(app, ["ask", "remove", *options, "--workdir", str(tmp_path)])
+    assert first.exit_code == 2, first.output
+    pending = json.loads(first.stdout)
+    second = CliRunner().invoke(app, ["ask", "new", *options, "--session-id", pending["session_id"]])
+    assert second.exit_code == 1, second.output
+    result = json.loads(second.stdout)
+    assert result["error"]["type"] == "session_pending_approval"
+    assert result["interrupts"] == pending["interrupts"]
+    assert result["interaction_id"] == pending["interaction_id"]
+    assert first.stderr == second.stderr == ""
+
+
+def test_resume_json_can_pause_again(config, tmp_path, monkeypatch):
+    from langchain_core.messages import AIMessage
+    from rs_harness import application, cli
+    from tests.models import ScriptedModel
+
+    model = ScriptedModel([
+        AIMessage(content="", tool_calls=[{"name": "bash", "args": {"command": "rm one.txt"}, "id": "one", "type": "tool_call"}]),
+        AIMessage(content="", tool_calls=[{"name": "bash", "args": {"command": "rm two.txt"}, "id": "two", "type": "tool_call"}]),
+    ])
+    session = application.create_session(config, workdir=str(tmp_path))
+    first = asyncio.run(application.ask(config, session.session_id, "run", model=model))
+    async def resume_with_model(config, session_id, decisions):
+        return await application.resume(config, session_id, decisions, model=model)
+    monkeypatch.setattr(cli, "resume", resume_with_model)
+    decisions_file = tmp_path / "decisions.json"
+    decisions_file.write_text(json.dumps({first.interrupts[0]["id"]: {"decisions": [{"type": "reject"}]}}))
+    result = CliRunner().invoke(app, [
+        "resume", "--config", str(tmp_path / "config.toml"), "--session-id", session.session_id,
+        "--decisions-file", str(decisions_file), "--json",
+    ])
+    assert result.exit_code == 2, result.output
+    assert result.stderr == ""
+    pending = json.loads(result.stdout)
+    assert pending["interaction_id"] == first.interaction_id
+    assert pending["interrupts"][0]["id"] != first.interrupts[0]["id"]
+    assert pending["interrupts"][0]["action_requests"][0]["args"] == {"command": "rm two.txt"}

@@ -15,10 +15,11 @@ from rs_harness.sessions.catalog import SessionCatalog
 
 
 @pytest.fixture
-def terminal_cli(config, tmp_path):
+def terminal_cli(config, tmp_path, request):
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 40, 0, 0))
-    script = """
+    settings = getattr(request, "param", None)
+    script = (settings["script"] if isinstance(settings, dict) else settings) or """
 import json
 from rs_harness import cli
 from rs_harness.application import InteractionResult
@@ -34,7 +35,7 @@ cli.ask = record_input
 cli.main()
 """
     process = subprocess.Popen(
-        [sys.executable, "-u", "-c", script, "--config", str(tmp_path / "config.toml")],
+        [sys.executable, "-u", "-c", script, "--config", str(tmp_path / "config.toml"), "--workdir", str(tmp_path)],
         stdin=slave,
         stdout=slave,
         stderr=slave,
@@ -63,7 +64,7 @@ cli.main()
         return received
 
     try:
-        read_until(b"rsh>")
+        read_until(settings["marker"] if isinstance(settings, dict) else b"rsh>")
         yield master, process, read_until
     finally:
         if process.poll() is None:
@@ -83,6 +84,15 @@ def submit(terminal_cli, keys):
     text = json.loads(read_until(b"\n").decode("utf-8"))
     read_until(b"rsh>")
     return text
+
+
+def test_terminal_prompt_is_blue(terminal_cli):
+    master, _, read_until = terminal_cli
+    os.write(master, b"blue prompt\r")
+    read_until(b"RSH_INPUT=")
+    read_until(b"\n")
+    displayed = read_until(b"rsh>")
+    assert b"\x1b[0;34m" in displayed
 
 
 @pytest.mark.parametrize(("keys", "expected"), [
@@ -114,3 +124,129 @@ def test_terminal_interrupt_or_eof_preserves_session(terminal_cli, config, keys)
     sessions = SessionCatalog.list(config)
     assert len(sessions) == 1
     assert sessions[0].meta.status == "running"
+
+
+PERMISSION_SCRIPT = '''
+from langchain_core.messages import AIMessage
+from rs_harness import cli, application
+from tests.models import ScriptedModel
+
+model = ScriptedModel([
+    AIMessage(content="", tool_calls=[
+        {"name":"bash", "args":{"command":"rm first.txt # \\u001b[31m\\n"}, "id":"first", "type":"tool_call"},
+        {"name":"bash", "args":{"command":"rm second.txt"}, "id":"second", "type":"tool_call"},
+    ]), AIMessage(content="permission-result"),
+])
+original_build = application.build_agent
+def build(config, *, workdir, checkpointer, model=model):
+    return original_build(config, workdir=workdir, checkpointer=checkpointer, model=model or globals()["model"])
+application.build_agent = build
+cli.main()
+'''
+
+
+def begin_review(terminal_cli, tmp_path):
+    for name in ("first.txt", "second.txt"):
+        (tmp_path / name).write_text("keep")
+    master, _, read_until = terminal_cli
+    os.write(master, b"remove\r")
+    displayed = read_until("是否执行？[yes/no]>".encode())
+    assert b"\x1b[0;33m" in displayed
+    assert "工具: bash".encode() in displayed
+    assert "操作: rm first.txt".encode() in displayed
+    assert b'"workdir"' not in displayed
+    assert b'"id"' not in displayed
+    return master, read_until
+
+
+@pytest.mark.parametrize("terminal_cli", [PERMISSION_SCRIPT], indirect=True)
+def test_terminal_collects_all_decisions_with_no_default_approval(terminal_cli, tmp_path):
+    master, read_until = begin_review(terminal_cli, tmp_path)
+    os.write(master, b"\r")
+    read_until("请输入 y/yes 或 n/no".encode())
+    read_until("是否执行？[yes/no]>".encode())
+    os.write(master, b"y\r")
+    read_until("是否执行？[yes/no]>".encode())
+    assert (tmp_path / "first.txt").exists()
+    os.write(master, b"n\r")
+    read_until(b"permission-result")
+    read_until(b"rsh>")
+    assert not (tmp_path / "first.txt").exists()
+    assert (tmp_path / "second.txt").read_text() == "keep"
+    os.write(master, b"/quit\r")
+    assert terminal_cli[1].wait(timeout=5) == 0
+
+
+@pytest.mark.parametrize("terminal_cli", [PERMISSION_SCRIPT], indirect=True)
+@pytest.mark.parametrize("keys", [b"\x03", b"\x04"])
+def test_terminal_partial_approval_is_discarded(terminal_cli, config, tmp_path, keys):
+    import asyncio
+    from rs_harness.application import get_pending_approvals
+
+    master, read_until = begin_review(terminal_cli, tmp_path)
+    os.write(master, b"y\r")
+    read_until("是否执行？[yes/no]>".encode())
+    os.write(master, keys)
+    assert terminal_cli[1].wait(timeout=5) == 0
+    assert (tmp_path / "first.txt").read_text() == "keep"
+    assert (tmp_path / "second.txt").read_text() == "keep"
+    session = SessionCatalog.list(config)[0]
+    pending = asyncio.run(get_pending_approvals(config, session.session_id))
+    assert len(pending.interrupts[0]["action_requests"]) == 2
+    assert "approval_submitted" not in session.trajectory_path.read_text()
+
+
+@pytest.mark.parametrize("terminal_cli", [PERMISSION_SCRIPT], indirect=True)
+def test_terminal_treats_slash_commands_as_invalid_approval_input(terminal_cli, config, tmp_path):
+    master, read_until = begin_review(terminal_cli, tmp_path)
+    for command in (b"/status\r", b"/close\r", b"/quit\r"):
+        os.write(master, command)
+        read_until("请输入 y/yes 或 n/no".encode())
+        read_until("是否执行？[yes/no]>".encode())
+    os.write(master, b"n\r")
+    read_until("是否执行？[yes/no]>".encode())
+    os.write(master, b"n\r")
+    read_until(b"permission-result")
+    read_until(b"rsh>")
+    assert SessionCatalog.list(config)[0].meta.status == "running"
+    assert (tmp_path / "first.txt").read_text() == "keep"
+    assert (tmp_path / "second.txt").read_text() == "keep"
+    os.write(master, b"/quit\r")
+    assert terminal_cli[1].wait(timeout=5) == 0
+
+
+PERMISSION_STARTUP_SCRIPT = PERMISSION_SCRIPT.replace("cli.main()", '''
+import asyncio
+import sys
+from pathlib import Path
+from rs_harness.config import Config
+
+config = Config.load(sys.argv[sys.argv.index("--config") + 1])
+workdir = Path(sys.argv[sys.argv.index("--workdir") + 1])
+for name in ("first.txt", "second.txt"):
+    (workdir / name).write_text("keep")
+session = application.create_session(config, workdir=str(workdir))
+asyncio.run(application.ask(config, session.session_id, "earlier request", model=model))
+sys.argv.extend(["--session-id", session.session_id])
+cli.main()
+''')
+
+
+@pytest.mark.parametrize("terminal_cli", [{"script": PERMISSION_STARTUP_SCRIPT, "marker": "是否执行？[yes/no]>".encode()}], indirect=True, ids=["pending-startup"])
+def test_terminal_opens_existing_approval_before_accepting_text(terminal_cli, config, tmp_path):
+    master, process, read_until = terminal_cli
+    os.write(master, b"this must not become a new question\r")
+    read_until("请输入 y/yes 或 n/no".encode())
+    read_until("是否执行？[yes/no]>".encode())
+    os.write(master, b"y\r")
+    read_until("是否执行？[yes/no]>".encode())
+    os.write(master, b"n\r")
+    read_until(b"permission-result")
+    read_until(b"rsh>")
+    os.write(master, b"/quit\r")
+    assert process.wait(timeout=5) == 0
+    session = SessionCatalog.list(config)[0]
+    records = [json.loads(line) for line in session.trajectory_path.read_text().splitlines()]
+    assert sum(record["event"] == "user_input" for record in records) == 1
+    assert not (tmp_path / "first.txt").exists()
+    assert (tmp_path / "second.txt").exists()

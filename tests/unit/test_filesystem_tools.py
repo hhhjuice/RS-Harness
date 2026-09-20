@@ -4,7 +4,7 @@ import pytest
 from langchain_core.tools import ToolException
 
 from rs_harness.context import AgentContext
-from rs_harness.tools.filesystem import edit_file, glob, read_file, write_file
+from rs_harness.tools.filesystem import edit_file, glob, read_file, resolve_file_path, write_file
 
 
 @pytest.fixture
@@ -47,7 +47,7 @@ def test_read_limits_and_unicode(tmp_path, runtime):
 
 
 @pytest.mark.parametrize("kind", ["parent", "absolute", "symlink", "symlink_parent"])
-def test_paths_cannot_escape_workdir(tmp_path, runtime, kind):
+def test_external_paths_resolve_for_agent_approval(tmp_path, runtime, kind):
     outside = tmp_path.parent / f"{tmp_path.name}-outside"
     outside.mkdir()
     (outside / "file.txt").write_text("untouched")
@@ -61,13 +61,8 @@ def test_paths_cannot_escape_workdir(tmp_path, runtime, kind):
     else:
         (tmp_path / "link").symlink_to(outside, target_is_directory=True)
         path = "link/new.txt"
-    for tool, arguments in [
-        (read_file, {"path": path}),
-        (write_file, {"path": path, "content": "changed"}),
-        (edit_file, {"path": path, "old_text": "untouched", "new_text": "changed"}),
-    ]:
-        with pytest.raises(ToolException, match="outside"):
-            tool.func(**arguments, runtime=runtime)
+    expected = outside / ("new.txt" if kind == "symlink_parent" else "file.txt")
+    assert resolve_file_path(path, runtime.context.workdir) == expected.resolve()
     assert (outside / "file.txt").read_text() == "untouched"
     assert not (outside / "new.txt").exists()
 

@@ -9,6 +9,7 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import (
     AgentMiddleware,
     AgentState,
+    HumanInTheLoopMiddleware,
     ModelCallLimitMiddleware,
 )
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -364,10 +365,11 @@ def test_production_agent_factory_wires_middleware_and_context(config, monkeypat
     assert captured["context_schema"] is AgentContext
     assert captured["checkpointer"] == "checkpoint"
     assert {tool.name for tool in captured["tools"]} == {"read_file", "write_file", "edit_file", "glob", "bash"}
-    assert len(captured["middleware"]) == 3
-    assert isinstance(captured["middleware"][0], ModelCallLimitMiddleware)
-    assert captured["middleware"][0].run_limit == config.runtime.max_model_calls
-    assert captured["middleware"][0].exit_behavior == "error"
+    assert len(captured["middleware"]) == 5
+    assert isinstance(captured["middleware"][0], HumanInTheLoopMiddleware)
+    assert isinstance(captured["middleware"][1], ModelCallLimitMiddleware)
+    assert captured["middleware"][1].run_limit == config.runtime.max_model_calls
+    assert captured["middleware"][1].exit_behavior == "error"
 
 
 class ApplicationContextCapture(AgentMiddleware[AgentState, AgentContext]):

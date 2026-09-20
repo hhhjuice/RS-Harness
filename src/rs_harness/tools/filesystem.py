@@ -1,4 +1,4 @@
-"""Workspace-bound UTF-8 file tools."""
+"""UTF-8 file tools with Agent-managed approval for external paths."""
 
 from pathlib import Path
 
@@ -11,7 +11,7 @@ from . import NonBlank
 
 
 class PathInput(BaseModel):
-    path: NonBlank = Field(description="File path, relative to the session workspace or absolute within it.")
+    path: NonBlank = Field(description="Relative or absolute file path. Access outside the workspace requires Agent approval.")
 
 
 class ReadInput(PathInput):
@@ -32,22 +32,30 @@ class GlobInput(BaseModel):
     pattern: NonBlank = Field(description="Workspace-relative file pattern; ** matches recursively.")
 
 
-def _file_path(path: str, workdir: str) -> Path:
+def resolve_file_path(path: str, workdir: str) -> Path:
     root = Path(workdir).resolve()
     candidate = Path(path).expanduser()
-    resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
-    if not resolved.is_relative_to(root):
-        raise ToolException(f"Path is outside the workspace: {path}")
+    return (candidate if candidate.is_absolute() else root / candidate).resolve()
+
+
+def _file_path(path: str, workdir: str) -> Path:
+    resolved = resolve_file_path(path, workdir)
     if resolved.exists() and not resolved.is_file():
         raise ToolException(f"Not a regular file: {path}")
     return resolved
 
 
+def _display_path(target: Path, workdir: str) -> str:
+    root = Path(workdir).resolve()
+    return str(target.relative_to(root) if target.is_relative_to(root) else target)
+
+
 @tool(args_schema=ReadInput)
 def read_file(path: str, runtime: ToolRuntime[AgentContext], offset: int = 1, limit: int = 200) -> dict:
-    """Read UTF-8 text from a workspace file, with line and output limits."""
+    """Read UTF-8 text with line and output limits. External paths require Agent approval."""
     try:
         target = _file_path(path, runtime.context.workdir)
+        display_path = _display_path(target, runtime.context.workdir)
         remaining = runtime.context.max_tool_output_bytes
         parts = []
         end_line = None
@@ -84,7 +92,7 @@ def read_file(path: str, runtime: ToolRuntime[AgentContext], offset: int = 1, li
             else:
                 truncated = bool(handle.read(1))
         return {
-            "path": str(target.relative_to(Path(runtime.context.workdir).resolve())),
+            "path": display_path,
             "content": "".join(parts),
             "start_line": offset,
             "end_line": end_line,
@@ -96,27 +104,29 @@ def read_file(path: str, runtime: ToolRuntime[AgentContext], offset: int = 1, li
 
 @tool(args_schema=WriteInput)
 def write_file(path: str, content: str, runtime: ToolRuntime[AgentContext]) -> dict:
-    """Create or overwrite a workspace file. Its parent directory must exist."""
+    """Create or overwrite a file with an existing parent. External paths require Agent approval."""
     try:
         target = _file_path(path, runtime.context.workdir)
+        display_path = _display_path(target, runtime.context.workdir)
         written = target.write_bytes(content.encode("utf-8"))
-        return {"path": str(target.relative_to(Path(runtime.context.workdir).resolve())), "bytes_written": written}
+        return {"path": display_path, "bytes_written": written}
     except (OSError, UnicodeError, ValueError) as exc:
         raise ToolException(f"write_file: {exc}") from exc
 
 
 @tool(args_schema=EditInput)
 def edit_file(path: str, old_text: str, new_text: str, runtime: ToolRuntime[AgentContext]) -> dict:
-    """Replace one exact text match in a workspace file; ambiguous matches fail without writing."""
+    """Replace one unique exact text match in a file. External paths require Agent approval."""
     try:
         target = _file_path(path, runtime.context.workdir)
+        display_path = _display_path(target, runtime.context.workdir)
         content = target.read_bytes().decode("utf-8")
         if "\x00" in content:
             raise ToolException(f"Not a UTF-8 text file: {path}")
         if not old_text or content.count(old_text) != 1:
             raise ToolException("old_text must occur exactly once; read the file and provide a unique match")
         target.write_bytes(content.replace(old_text, new_text, 1).encode("utf-8"))
-        return {"path": str(target.relative_to(Path(runtime.context.workdir).resolve())), "replacements": 1}
+        return {"path": display_path, "replacements": 1}
     except (OSError, UnicodeError, ValueError) as exc:
         raise ToolException(f"edit_file: {exc}") from exc
 
