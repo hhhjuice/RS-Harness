@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from tests.models import ToolCallingChatModel as FakeListChatModel
 
 from rs_harness.application import ask, create_session
 

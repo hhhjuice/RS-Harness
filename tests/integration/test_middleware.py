@@ -11,11 +11,9 @@ from langchain.agents.middleware import (
     AgentState,
     ModelCallLimitMiddleware,
 )
-from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain.tools import ToolRuntime, tool
 from langgraph.checkpoint.memory import InMemorySaver
-from pydantic import PrivateAttr
 from typer.testing import CliRunner
 
 from rs_harness import cli
@@ -23,32 +21,7 @@ from rs_harness.agents.main import AgentContext, build_agent
 from rs_harness.agents.middleware import build_middleware
 from rs_harness.application import ask, create_session
 from rs_harness.sessions.checkpoints import open_checkpointer
-
-
-class ScriptedModel(FakeMessagesListChatModel):
-    """A deterministic model that also supports LangChain tool binding."""
-
-    _call_count: int = PrivateAttr(default=0)
-    _inputs: list[list[Any]] = PrivateAttr(default_factory=list)
-
-    def __init__(self, responses):
-        super().__init__(responses=responses)
-
-    @property
-    def call_count(self) -> int:
-        return self._call_count
-
-    @property
-    def inputs(self) -> list[list[Any]]:
-        return self._inputs
-
-    def bind_tools(self, tools, **kwargs):
-        return self
-
-    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        self._call_count += 1
-        self._inputs.append(list(messages))
-        return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+from tests.models import ScriptedModel
 
 
 class ProbeState(AgentState):
@@ -390,8 +363,8 @@ def test_production_agent_factory_wires_middleware_and_context(config, monkeypat
     assert result is not None
     assert captured["context_schema"] is AgentContext
     assert captured["checkpointer"] == "checkpoint"
-    assert captured["tools"] == []
-    assert len(captured["middleware"]) == 1
+    assert {tool.name for tool in captured["tools"]} == {"read_file", "write_file", "edit_file", "glob", "bash"}
+    assert len(captured["middleware"]) == 3
     assert isinstance(captured["middleware"][0], ModelCallLimitMiddleware)
     assert captured["middleware"][0].run_limit == config.runtime.max_model_calls
     assert captured["middleware"][0].exit_behavior == "error"
@@ -470,7 +443,7 @@ async def test_application_records_budget_failure_and_allows_next_interaction(co
     assert failed.error["type"] == "ModelCallLimitExceededError"
     events = [json.loads(line) for line in session.trajectory_path.read_text().splitlines()]
     assert [event["event"] for event in events] == [
-        "user_input", "model_start", "model_end", "interaction_failed",
+        "user_input", "model_start", "model_end", "tool_start", "tool_end", "interaction_failed",
     ]
     assert model.call_count == 1
 
@@ -525,7 +498,7 @@ def test_cli_budget_failure_and_next_interaction(config, monkeypatch, tmp_path, 
 
     events = [json.loads(line) for line in session.trajectory_path.read_text().splitlines()]
     assert [event["event"] for event in events] == [
-        "user_input", "model_start", "model_end", "interaction_failed",
+        "user_input", "model_start", "model_end", "tool_start", "tool_end", "interaction_failed",
         "user_input", "model_start", "model_end", "interaction_succeeded",
     ]
     assert model.call_count == 2

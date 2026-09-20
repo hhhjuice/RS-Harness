@@ -11,6 +11,21 @@ def test_config_resolves_paths_and_prompt(config):
     assert config.runtime.checkpoint_file == config.runtime.sessions_dir / "checkpoints.sqlite3"
     assert config.runtime.max_model_calls == 10
     assert config.summary()["max_model_calls"] == 10
+    assert config.summary()["bash_timeout_s"] == 60
+    assert config.summary()["max_tool_output_bytes"] == 65536
+
+
+@pytest.mark.parametrize("field,value", [
+    ("bash_timeout_s", 0), ("bash_timeout_s", -1), ("bash_timeout_s", True),
+    ("bash_timeout_s", "60"), ("bash_timeout_s", float("inf")), ("bash_timeout_s", float("nan")),
+    ("max_tool_output_bytes", 0), ("max_tool_output_bytes", -1),
+    ("max_tool_output_bytes", True), ("max_tool_output_bytes", 1.5), ("max_tool_output_bytes", "10"),
+])
+def test_tool_limits_are_strict(config, field, value):
+    from rs_harness.config import RuntimeConfig
+
+    with pytest.raises(ValueError):
+        RuntimeConfig.model_validate({**config.runtime.model_dump(), field: value})
 
 
 @pytest.mark.parametrize("rendered", ["0", "-1", "true", "false", "1.0", "1.5", '"10"'])

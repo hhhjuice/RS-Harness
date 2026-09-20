@@ -1,6 +1,6 @@
 # RS-Harness LangChain 重构方案
 
-日期：2026-09-18｜状态：阶段 1 已完成，阶段 2（v0.0.2）开发完成、离线回归通过（真实模型冒烟待复验），阶段 3—6 尚未实现
+日期：2026-09-18｜状态：阶段 1—3 已完成，v0.0.3 离线回归 134 项、真实模型验收 6 项通过；阶段 4—6 尚未实现
 
 ## 1. 目标与范围
 
@@ -221,6 +221,7 @@ RS-Harness/
 - 第一阶段的 Loop 是无工具对话，由 `create_agent` 驱动；模型—工具完整循环在第三阶段验收。session 记录从第一阶段可用，后续逐步增加工具、审批和子调用事件。
 - 第二阶段提供扩展方式，不提前实现后续能力。Permission 和任务规划都是官方 middleware 的具体应用，分别在第四、第五阶段接入。
 - 第二阶段的具体改动、接口约定与验收矩阵及实施记录见 [`v0.0.2——AgentMiddleware 扩展.md`](./v0.0.2——AgentMiddleware%20扩展.md)；审查问题已修复，开发完成，离线回归 62 项通过；真实模型冒烟此前连接失败，本次联网复验因自动审批服务 503 未执行。
+- 第三阶段的工具契约、多模态入口、验收矩阵和实施记录见 [`v0.0.3——五种基础工具接入与多模态输入.md`](./v0.0.3——五种基础工具接入与多模态输入.md)；五工具、轨迹、本地/URL 图片及恢复已实现，离线回归 134 项、真实模型 6 项通过，含阶段二能力在当前版本的三轮文本复验。
 - 第三阶段在临时工作目录中验证工具；第四阶段完成面向用户的人工审批流程，不为开发阶段增加绕过审批的运行开关。
 - 任务规划本身不强依赖 Permission，仍按给定顺序独立验收；SubAgent 放在最后，以复用已经验证的工具、middleware、审批和记录机制。
 
@@ -259,4 +260,4 @@ RS-Harness/
 - [Subagents](https://docs.langchain.com/oss/python/langchain/multi-agent/subagents)：子Agent作为工具、默认调用级上下文隔离及继承Checkpointer。
 - [Short-term memory](https://docs.langchain.com/oss/python/langchain/short-term-memory)、[Persistence](https://docs.langchain.com/oss/python/langgraph/persistence)：框架维护同thread上下文，Checkpointer与跨thread Store职责不同；SQLite异步接线在第一阶段验证。
 
-阶段 1 已完成依赖安装、SQLite 恢复、基本 callback、本地 session、CLI 多轮交互和真实模型冒烟验证；阶段 2 已完成 middleware 组合入口、模型调用预算、runtime context 和确定性验收，真实模型冒烟待联网复验。阶段 3—6 仍待按本方案实施。多模态序列化在第三阶段验证，审批恢复在第四阶段验证，嵌套中断与子调用 callback 在第六阶段验证。此前取得的 callback 材料不足以确认具体事件签名，故本方案不固定未经验证的回调方法名。记录器只做轻量本地适配，不扩展为旧 RSH 上下文引擎或审计系统。
+阶段 1 已完成基本对话、会话与持久化；阶段 2 已完成 middleware、预算和 runtime context，相关能力已随 v0.0.3 联网复验。阶段 3 已实现五工具、官方工具错误处理、工具 callback 和标准多模态输入；已用 DeepSeek Flash 验证真实工具链路、文本+图片、仅图片、URL 图片及跨进程恢复。callback 签名和多模态序列化以第三阶段实施记录中的锁定版本验证为准。阶段 4—6 仍待实施：审批恢复在第四阶段验证，嵌套中断与子调用 callback 在第六阶段验证。记录器继续只做轻量本地适配，不扩展为旧 RSH 上下文引擎或审计系统。

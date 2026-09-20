@@ -6,7 +6,7 @@ import sys
 
 import pytest
 from langchain_core.callbacks import AsyncCallbackHandler
-from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from tests.models import ToolCallingChatModel as FakeListChatModel
 
 from rs_harness.agents.main import build_agent
 from rs_harness.application import ask, create_session
@@ -142,7 +142,7 @@ async def test_legacy_session_resumes_checkpoint_in_another_process(config, tmp_
     script = """
 import asyncio
 import sys
-from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from tests.models import ToolCallingChatModel as FakeListChatModel
 from rs_harness.application import ask, create_session
 from rs_harness.config import Config
 

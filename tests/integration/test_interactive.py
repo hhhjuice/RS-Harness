@@ -2,7 +2,7 @@ import asyncio
 import json
 
 import pytest
-from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from tests.models import ToolCallingChatModel as FakeListChatModel
 from pydantic import PrivateAttr
 from typer.testing import CliRunner
 

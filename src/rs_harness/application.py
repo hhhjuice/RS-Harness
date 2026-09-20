@@ -6,10 +6,12 @@ from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
+from langchain_core.messages import HumanMessage
 
-from .agents.main import AgentContext, build_agent
+from .agents.main import build_agent
 from .config import Config
-from .inputs import build_human_message, extract_answer
+from .context import AgentContext
+from .inputs import build_human_message, extract_answer, summarize_message_content, validate_human_message, validate_image_messages
 from .sessions.catalog import Session, SessionCatalog, SessionError
 from .sessions.checkpoints import open_checkpointer
 from .sessions.recording import TrajectoryRecorder, TrajectoryWriter
@@ -34,11 +36,13 @@ def create_session(config: Config, *, workdir: str | None = None) -> Session:
 async def ask(
     config: Config,
     session_id: str,
-    text: str,
+    text: str | HumanMessage,
     *,
     model: Any | None = None,
 ) -> InteractionResult:
-    message = build_human_message(text)
+    message = build_human_message(text) if isinstance(text, str) else text
+    validate_human_message(message)
+    validate_image_messages([message], config)
     interaction_id = uuid4().hex
     try:
         session = SessionCatalog.open(config, session_id)
@@ -58,7 +62,7 @@ async def ask(
 
     try:
         with session.interaction_lock():
-            writer.append("user_input", {"text": text})
+            writer.append("user_input", {"content": summarize_message_content(message)})
             try:
                 async with open_checkpointer(config) as checkpointer:
                     agent = build_agent(
@@ -78,7 +82,11 @@ async def ask(
                             },
                             "run_name": "rsh_agent",
                         },
-                        context=AgentContext(workdir=session.meta.workdir),
+                        context=AgentContext(
+                            workdir=session.meta.workdir,
+                            bash_timeout_s=config.runtime.bash_timeout_s,
+                            max_tool_output_bytes=config.runtime.max_tool_output_bytes,
+                        ),
                     )
                 answer = extract_answer(result)
             except Exception as exc:

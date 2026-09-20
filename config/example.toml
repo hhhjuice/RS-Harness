@@ -10,3 +10,5 @@ sessions_dir = "../sessions"
 system_prompt_file = "../prompts/system.md"
 checkpoint_file = "checkpoints.sqlite3"
 max_model_calls = 10
+bash_timeout_s = 60
+max_tool_output_bytes = 65536

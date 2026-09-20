@@ -1,19 +1,14 @@
-"""Minimal text-only LangChain agent assembly."""
+"""LangChain agent assembly with the five local tools."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 from ..agents.middleware import build_middleware
 from ..config import Config
-
-
-@dataclass(frozen=True)
-class AgentContext:
-    """Per-invocation runtime dependencies kept outside Agent state."""
-
-    workdir: str
+from ..context import AgentContext
+from ..tools.filesystem import edit_file, glob, read_file, write_file
+from ..tools.shell import bash
 
 
 def build_agent(
@@ -40,7 +35,7 @@ def build_agent(
 
     return create_agent(
         model=model,
-        tools=[],
+        tools=[read_file, write_file, edit_file, glob, bash],
         system_prompt=config.system_prompt(workdir),
         middleware=build_middleware(config),
         context_schema=AgentContext,

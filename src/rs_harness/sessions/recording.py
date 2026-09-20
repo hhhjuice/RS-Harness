@@ -103,6 +103,40 @@ class TrajectoryRecorder(AsyncCallbackHandler):
             parent_run_id=parent_run_id,
         )
 
+    async def on_tool_start(
+        self, serialized: dict[str, Any], input_str: str, *, run_id: UUID,
+        parent_run_id: UUID | None = None, inputs: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self.writer.append(
+            "tool_start",
+            {
+                "name": serialized.get("name"),
+                "inputs": inputs if inputs is not None else input_str,
+                "tool_call_id": kwargs.get("tool_call_id"),
+            },
+            run_id=run_id, parent_run_id=parent_run_id,
+        )
+
+    async def on_tool_end(
+        self, output: Any, *, run_id: UUID, parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self.writer.append(
+            "tool_end", {"output": _jsonable(output)},
+            run_id=run_id, parent_run_id=parent_run_id,
+        )
+
+    async def on_tool_error(
+        self, error: BaseException, *, run_id: UUID, parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self.writer.append(
+            "tool_error",
+            {"type": type(error).__name__, "message": str(error), "tool_call_id": kwargs.get("tool_call_id")},
+            run_id=run_id, parent_run_id=parent_run_id,
+        )
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

@@ -1,4 +1,4 @@
-"""Typer CLI for local text sessions."""
+"""Typer CLI for local text and image sessions."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from prompt_toolkit import PromptSession
 from . import __version__
 from .application import InteractionResult, ask, create_session
 from .config import Config, ConfigError
+from .inputs import InputError, build_human_message
 from .sessions.catalog import SessionBusy, SessionCatalog, SessionError
 
 app = typer.Typer(add_completion=False, no_args_is_help=False)
@@ -36,7 +37,7 @@ def _print_result(result: InteractionResult, as_json: bool) -> None:
 @app.callback(invoke_without_command=True)
 def root(
     ctx: typer.Context,
-    config: Annotated[Path, typer.Option("--config", exists=True, dir_okay=False)] = Path("config/default.toml"),
+    config: Annotated[Path, typer.Option("--config", dir_okay=False)] = Path("config/default.toml"),
     session_id: Annotated[str | None, typer.Option("--session-id")] = None,
     workdir: Annotated[Path | None, typer.Option("--workdir", file_okay=False)] = None,
 ) -> None:
@@ -47,25 +48,34 @@ def root(
 
 @app.command("ask")
 def ask_command(
-    text: str,
+    text: Annotated[str, typer.Argument()] = "",
     config: Annotated[Path, typer.Option("--config", exists=True, dir_okay=False)] = Path("config/default.toml"),
     session_id: Annotated[str | None, typer.Option("--session-id")] = None,
     workdir: Annotated[Path | None, typer.Option("--workdir", file_okay=False)] = None,
     as_json: Annotated[bool, typer.Option("--json")] = False,
+    images: Annotated[list[str] | None, typer.Option("--image", help="Local image path or HTTP(S) URL; repeat for multiple images.")] = None,
 ) -> None:
-    if not text.strip():
+    if not text.strip() and not images:
         raise typer.Exit(code=0)
     try:
         loaded = _load(config)
+        session = SessionCatalog.open(loaded, session_id) if session_id else None
+        input_workdir = session.meta.workdir if session else (workdir or Path.cwd())
+        if session and workdir and workdir.expanduser().resolve() != Path(session.meta.workdir):
+            raise InputError("session_workdir_mismatch: an existing session keeps its original workdir")
+        message = build_human_message(text, images=images or (), workdir=input_workdir, config=loaded)
         if session_id is None:
             session = create_session(loaded, workdir=str(workdir) if workdir else None)
             session_id = session.session_id
-        result = asyncio.run(ask(loaded, session_id, text))
+        result = asyncio.run(ask(loaded, session_id, message))
         _print_result(result, as_json)
         if result.status != "succeeded":
             raise typer.Exit(code=1)
-    except (ConfigError, SessionError, SessionBusy) as exc:
-        typer.echo(f"Error: {exc}", err=True)
+    except (ConfigError, SessionError, SessionBusy, InputError) as exc:
+        if as_json:
+            typer.echo(json.dumps({"status": "failed", "error": {"type": type(exc).__name__, "message": str(exc)}}, ensure_ascii=False))
+        else:
+            typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
 
@@ -137,12 +147,12 @@ async def _interactive(config_path: Path, *, session_id: str | None, workdir: Pa
                 text = typer.prompt("rsh", prompt_suffix="> ", default="", show_default=False)
         except (EOFError, KeyboardInterrupt, typer.Abort):
             typer.echo()
-            return
+            break
         command = text.strip()
         if not command:
             continue
         if command in {"/quit", "/exit"}:
-            return
+            break
         if command == "/help":
             typer.echo("/status  show session status\n/close   close session\n/quit    leave session running\n/exit    leave session running")
             continue
@@ -161,16 +171,18 @@ async def _interactive(config_path: Path, *, session_id: str | None, workdir: Pa
                     typer.echo(f"Closed session {session.session_id}")
                 except (SessionError, SessionBusy) as exc:
                     typer.echo(f"Error: {exc}", err=True)
-            return
+            break
 
         try:
             if session is None:
                 session = create_session(config, workdir=str(workdir) if workdir else None)
-                typer.echo(f"session {session.session_id}")
             result = await ask(config, session.session_id, text)
             _print_result(result, False)
         except (ConfigError, SessionError, SessionBusy) as exc:
             typer.echo(f"Error: {exc}", err=True)
+
+    if session is not None and session.meta.status == "running":
+        typer.echo(f"Use rsh --session-id {session.session_id} to resume this session.", err=True)
 
 
 def main() -> None:
