@@ -11,6 +11,19 @@ cp config/example.toml config/default.toml
 
 `[runtime].max_model_calls` 默认为 `10`，限制一次 `ainvoke` 执行段中的模型调用次数。达到预算后，下一次模型调用返回 `ModelCallLimitExceededError`；新的普通交互或审批恢复重新获得预算，不跨恢复累计。工作目录通过每次调用的 runtime context 注入 middleware 和工具，context 对象不作为消息历史保存；系统提示词保留现有工作目录说明。
 
+Agent 已接入 Stop Hook 协议，默认检查列表为空，不预设任务验收规则。在 `src/rs_harness/agents/middleware.py` 的 `build_middleware` 中，将末尾的 `StopHookMiddleware()` 改为 `StopHookMiddleware(hooks=(first_check, second_check))`，并定义或导入对应检查函数，即可集中注册；CLI、普通提问和审批恢复使用同一套注册。
+
+`StopHook` 接收完整的 `list[BaseMessage]` 消息历史（含本次准备返回的回答），支持返回 `str | None` 的同步函数或异步函数。历史仅供读取，检查函数不应原地修改消息。仅在最后一条消息为没有工具调用的 `AIMessage` 时，按注册顺序运行检查：
+
+| 返回值 | 行为 |
+| --- | --- |
+| `None` | 继续下一个检查；全部通过后正常结束 |
+| 非空字符串 | 停止后续检查，追加对应的 `HumanMessage`，继续模型—工具循环 |
+| 空字符串 `""` | 停止后续检查并正常结束，不追加消息 |
+| 其他类型 | 抛出 `TypeError`，本轮失败 |
+
+续跑使用官方 `aafter_agent` 跳转，仍处于同一次 `ainvoke`，不重置模型预算；持续要求续跑最终会触发现有预算错误。注入的提示随消息进入 Checkpoint，不创建新的用户交互或 `user_input` 记录。工具执行阶段和审批暂停时不检查；续跑可以再次调用工具或等待审批，审批恢复完成后再检查。检查异常按现有失败流程处理，调用任务的取消继续向上传播，最终只返回允许结束时的回答。
+
 ```bash
 uv run rsh --config config/default.toml
 uv run rsh --config config/default.toml --session-id <SESSION_ID>

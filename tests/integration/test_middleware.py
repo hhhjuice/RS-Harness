@@ -19,7 +19,7 @@ from typer.testing import CliRunner
 
 from rs_harness import cli
 from rs_harness.agents.main import AgentContext, build_agent
-from rs_harness.agents.middleware import build_middleware
+from rs_harness.agents.middleware import StopHookMiddleware, build_middleware
 from rs_harness.application import ask, create_session
 from rs_harness.sessions.checkpoints import open_checkpointer
 from tests.models import ScriptedModel
@@ -365,11 +365,13 @@ def test_production_agent_factory_wires_middleware_and_context(config, monkeypat
     assert captured["context_schema"] is AgentContext
     assert captured["checkpointer"] == "checkpoint"
     assert {tool.name for tool in captured["tools"]} == {"read_file", "write_file", "edit_file", "glob", "bash"}
-    assert len(captured["middleware"]) == 5
+    assert len(captured["middleware"]) == 6
     assert isinstance(captured["middleware"][0], HumanInTheLoopMiddleware)
     assert isinstance(captured["middleware"][1], ModelCallLimitMiddleware)
     assert captured["middleware"][1].run_limit == config.runtime.max_model_calls
     assert captured["middleware"][1].exit_behavior == "error"
+    assert isinstance(captured["middleware"][-1], StopHookMiddleware)
+    assert captured["middleware"][-1].hooks == ()
 
 
 class ApplicationContextCapture(AgentMiddleware[AgentState, AgentContext]):

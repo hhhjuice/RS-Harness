@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable, Sequence
+from inspect import isawaitable
 from pathlib import Path
 from typing import Literal
 
-from langchain.agents.middleware import AgentMiddleware, HumanInTheLoopMiddleware, ModelCallLimitMiddleware, ToolErrorMiddleware
-from langchain_core.messages import ToolMessage
+from langchain.agents.middleware import AgentMiddleware, HumanInTheLoopMiddleware, ModelCallLimitMiddleware, ToolErrorMiddleware, hook_config
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.tools import ToolException
 
 from ..config import Config
@@ -75,6 +77,32 @@ class ImageInputMiddleware(AgentMiddleware):
         return await handler(request)
 
 
+StopHook = Callable[[list[BaseMessage]], str | None | Awaitable[str | None]]
+
+
+class StopHookMiddleware(AgentMiddleware):
+    def __init__(self, hooks: Sequence[StopHook] = ()):
+        self.hooks = tuple(hooks)
+
+    @hook_config(can_jump_to=["model"])
+    async def aafter_agent(self, state, runtime):
+        messages = state["messages"]
+        if not messages or not isinstance(messages[-1], AIMessage) or messages[-1].tool_calls:
+            return None
+        for hook in self.hooks:
+            result = hook(messages)
+            if isawaitable(result):
+                result = await result
+            if result is None:
+                continue
+            if not isinstance(result, str):
+                raise TypeError("Stop hook must return str or None")
+            if result:
+                return {"messages": [HumanMessage(content=result)], "jump_to": "model"}
+            return None
+        return None
+
+
 def build_middleware(config: Config) -> list[AgentMiddleware]:
     """Build fresh middleware instances for one Agent graph."""
 
@@ -97,4 +125,5 @@ def build_middleware(config: Config) -> list[AgentMiddleware]:
         ToolDenyMiddleware(),
         ToolErrorMiddleware(on_error=_tool_error),
         ImageInputMiddleware(config),
+        StopHookMiddleware(),
     ]
