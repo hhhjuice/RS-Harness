@@ -8,11 +8,13 @@ from pathlib import Path
 from typing import Literal
 
 from langchain.agents.middleware import AgentMiddleware, HumanInTheLoopMiddleware, ModelCallLimitMiddleware, TodoListMiddleware, ToolErrorMiddleware, hook_config
+from langchain_core.callbacks.manager import adispatch_custom_event
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.runnables.config import ensure_config
 from langchain_core.tools import ToolException
 
 from ..config import Config
-from ..inputs import validate_image_messages
+from ..inputs import InputError, validate_image_messages
 from ..tools.filesystem import resolve_file_path
 
 
@@ -55,6 +57,7 @@ class ToolDenyMiddleware(AgentMiddleware):
         if request.tool_call.get("name") == "bash":
             decision, reason = classify_tool_call(request.tool_call, request.runtime.context.workdir)
             if decision == "deny":
+                await _notify_middleware(self.name, "blocked", f"{request.tool_call['name']}: {reason}")
                 return ToolMessage(
                     content=reason, status="error", name=request.tool_call["name"],
                     tool_call_id=request.tool_call["id"],
@@ -73,8 +76,20 @@ class ImageInputMiddleware(AgentMiddleware):
         self.config = config
 
     async def awrap_model_call(self, request, handler):
-        validate_image_messages(request.messages, self.config, getattr(request.model, "profile", None))
+        try:
+            validate_image_messages(request.messages, self.config, getattr(request.model, "profile", None))
+        except InputError as exc:
+            await _notify_middleware(self.name, "error", str(exc), error_type=type(exc).__name__)
+            raise
         return await handler(request)
+
+
+async def _notify_middleware(name: str, status: str, detail: str, *, error_type: str | None = None) -> None:
+    config = ensure_config()
+    if config.get("callbacks"):
+        await adispatch_custom_event(
+            "rsh.middleware", {"name": name, "status": status, "detail": detail, "error_type": error_type}, config=config,
+        )
 
 
 StopHook = Callable[[list[BaseMessage]], str | None | Awaitable[str | None]]

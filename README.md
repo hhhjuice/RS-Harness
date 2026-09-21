@@ -77,7 +77,34 @@ uv run rsh resume --config config/default.toml --session-id <SESSION_ID> --decis
 
 上例对应一个包含两项动作的中断。缺失、过期或额外 ID、数量不匹配、额外字段及重复 JSON 键都会在执行前拒绝。同批只要存在 ask，整个工具节点都会等待；allow/deny 不占 decisions 位置，恢复后仍由框架默认调度。恢复可能再次暂停，使用最新中断重新决定。
 
-交互模式可连续输入多轮问题，整个交互过程共用一个异步事件循环。TTY 下普通 `rsh>` 输入提示显示为蓝色，审批输入提示显示为黄色。触发审批时只显示工具名称和实际操作；审批阶段只接受 `y/yes` 或 `n/no`，分别对应批准或拒绝，其他输入不会改变审批状态。空输入不批准，收齐后才提交。审批期间 Ctrl+C 或 Ctrl+D 丢弃尚未提交的决定并保留暂停，之后可通过 `--session-id` 继续；普通交互阶段仍支持 `/status`、`/close`、`/quit` 和 `/exit`。审批展示和提示写入 stderr，最终回答写入 stdout。管道或重定向模式遇到待审即以 2 退出，不消费后续输入作为批准。
+交互模式可连续输入多轮问题，整个交互过程共用一个异步事件循环。TTY 下普通 `rsh>` 输入提示显示为蓝色，审批输入提示显示为黄色。触发审批时显示待审批数量、工具名称和实际操作；审批阶段只接受 `y/yes` 或 `n/no`，分别对应批准或拒绝，其他输入不会改变审批状态。空输入不批准，收齐后才提交。审批期间 Ctrl+C 或 Ctrl+D 丢弃尚未提交的决定并保留暂停，之后可通过 `--session-id` 继续；普通交互阶段仍支持 `/status`、`/close`、`/quit` 和 `/exit`。审批展示和提示写入 stderr，最终回答写入 stdout。管道或重定向模式遇到待审即以 2 退出，不消费后续输入作为批准。
+
+交互模式和普通 `ask`/`resume` 会实时显示模型调用、普通工具开始与完成/失败。开始与结束通知重复显示对应操作摘要，不提供编号；摘要先脱敏再截断，最多 160 个字符，长操作的差异可能被截断。写入/编辑正文只显示长度，成功结果正文不展开。命令摘要隐藏敏感变量赋值和 Authorization 头，无法确定敏感值边界时隐藏整条命令摘要。中间件默认静默，仅在以下情况通知：
+
+| 中间件 | 显示内容 |
+| --- | --- |
+| `ModelCallLimitMiddleware` | 预算耗尽、阻止继续调用 |
+| `ImageInputMiddleware` | 图片校验失败及简短原因 |
+| `HumanInTheLoopMiddleware` | CLI 展示一次待审批数量和操作；恢复且决定实际处理后，显示批准/拒绝数量 |
+| `ToolDenyMiddleware` | 实际拦截的工具名和原因 |
+| `ToolErrorMiddleware` | 合并到工具失败通知，显示错误类型和短原因 |
+| `TodoListMiddleware` | 计划更新、清空或更新被拒绝；最多展开三项，不额外打印 `write_todos` 开始/完成 |
+| `StopHookMiddleware` | 要求继续执行，或检查异常 |
+
+人工拒绝表示未执行，待审批、取消及框架中断不打印为工具失败。已经显示过原因的错误若终止本轮，最终仅补充“本轮执行失败”。摘要写入 stderr，TTY 下带颜色，重定向时为纯文本；`--json` 关闭这些通知，保持 stdout 为单个 JSON 对象。展示依据实际回调和状态，不输出模型内部思维、完整消息历史或图片数据。
+
+Python 调用默认不输出运行摘要；可向 `ask`/`resume` 传入 `callbacks=[...]` 接入 LangChain callback handler。CLI 展示与 `trajectory.jsonl` 记录各自独立，控制台写入失败不会重试工具或改变 Agent 的结果。
+
+同名工具并发时，完成顺序可能不同于开始顺序；各条通知复用该次调用开始时生成的操作摘要。例如：
+
+```text
+[工具] bash · 开始 {"command":"ls -la /Users/hgz/WorkSpace/RS-Harness/ 2>&1 | head -40"}
+[工具] bash · 开始 {"command":"ls -la /Users/hgz/WorkSpace/ 2>&1 | head -40"}
+[工具] bash · 完成 (0.02s) {"command":"ls -la /Users/hgz/WorkSpace/ 2>&1 | head -40"}
+[工具] bash · 完成 (0.03s) {"command":"ls -la /Users/hgz/WorkSpace/RS-Harness/ 2>&1 | head -40"}
+```
+
+交互模式的模型调用计数随新输入重置，同一输入引发的审批恢复继续累计；独立启动的 `ask`/`resume` 命令从 1 计数。该数字表示当前展示范围内的调用次数，执行预算仍由中间件管理。
 
 终端输入支持中文编辑：左右键移动光标，Backspace/Delete 删除字符，Home/End 移至行首/行尾，上下键浏览本次运行的输入历史。历史仅保存在内存中；Enter 提交问题，输入提示符处 Ctrl+C 或空行 Ctrl+D 退出并保留会话。重定向或管道输入使用普通文本读取。
 

@@ -476,8 +476,8 @@ def test_cli_budget_failure_and_next_interaction(config, monkeypatch, tmp_path, 
     def build_test_agent(loaded_config, *, workdir, checkpointer=None, model=None):
         return _agent(model, middleware=build_middleware(loaded_config), checkpointer=checkpointer)
 
-    async def ask_with_model(loaded_config, session_id, text):
-        return await ask(loaded_config, session_id, text, model=model)
+    async def ask_with_model(loaded_config, session_id, text, **kwargs):
+        return await ask(loaded_config, session_id, text, model=model, **kwargs)
 
     monkeypatch.setattr("rs_harness.application.build_agent", build_test_agent)
     monkeypatch.setattr(cli, "ask", ask_with_model)

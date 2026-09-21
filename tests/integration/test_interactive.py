@@ -38,8 +38,8 @@ def test_interactive_multiturn_preserves_client_loop_and_history(config, tmp_pat
 
     model = LoopBoundChatModel(responses=["first answer", "second answer"])
 
-    async def ask_with_model(loaded_config, session_id, text):
-        return await application.ask(loaded_config, session_id, text, model=model)
+    async def ask_with_model(loaded_config, session_id, text, **kwargs):
+        return await application.ask(loaded_config, session_id, text, model=model, **kwargs)
 
     monkeypatch.setattr(cli, "ask", ask_with_model)
     result = CliRunner().invoke(

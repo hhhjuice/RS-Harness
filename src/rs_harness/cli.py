@@ -18,6 +18,7 @@ from . import __version__
 from .application import ApprovalStatus, InteractionResult, ask, create_session, get_pending_approvals, resume
 from .config import Config, ConfigError
 from .inputs import InputError, build_human_message
+from .progress import CliProgress
 from .sessions.catalog import SessionBusy, SessionCatalog, SessionError
 
 app = typer.Typer(add_completion=False, no_args_is_help=False)
@@ -32,7 +33,7 @@ def _load(path: Path) -> Config:
     return Config.load(path)
 
 
-def _print_result(result: InteractionResult, as_json: bool) -> None:
+def _print_result(result: InteractionResult, as_json: bool, progress: CliProgress | None = None) -> None:
     payload = result.model_dump(mode="json")
     if as_json:
         typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -40,6 +41,8 @@ def _print_result(result: InteractionResult, as_json: bool) -> None:
         typer.echo(result.answer or "")
     elif result.interrupts:
         _print_approvals(result)
+    elif progress is not None and progress.has_reported_error(result.error):
+        typer.echo("本轮执行失败。", err=True)
     else:
         typer.echo(f"Error: {payload.get('error')}", err=True)
 
@@ -60,9 +63,16 @@ def _print_action(action: dict) -> None:
 
 
 def _print_approvals(pending: ApprovalStatus | InteractionResult) -> None:
+    _print_approval_header(pending)
     for interrupt in pending.interrupts:
         for action in interrupt.get("action_requests", []):
             _print_action(action)
+
+
+def _print_approval_header(pending: ApprovalStatus | InteractionResult) -> None:
+    count = sum(len(item.get("action_requests", [])) for item in pending.interrupts)
+    if count:
+        typer.echo(f"[审批] 等待审批（{count} 项）", err=True)
 
 
 def _exit_code(result: InteractionResult) -> int:
@@ -109,8 +119,10 @@ def ask_command(
         if session_id is None:
             session = create_session(loaded, workdir=str(workdir) if workdir else None)
             session_id = session.session_id
-        result = asyncio.run(ask(loaded, session_id, message))
-        _print_result(result, as_json)
+        progress = None if as_json else CliProgress()
+        options = {} if progress is None else {"callbacks": [progress]}
+        result = asyncio.run(ask(loaded, session_id, message, **options))
+        _print_result(result, as_json, progress)
         if result.status != "succeeded":
             raise typer.Exit(code=_exit_code(result))
     except (ConfigError, SessionError, SessionBusy, InputError) as exc:
@@ -163,11 +175,13 @@ def resume_command(
     try:
         loaded = _load(config)
         session = SessionCatalog.open(loaded, session_id)
-        result = asyncio.run(resume(loaded, session_id, decisions))
+        progress = None if as_json else CliProgress()
+        options = {} if progress is None else {"callbacks": [progress]}
+        result = asyncio.run(resume(loaded, session_id, decisions, **options))
     except (ConfigError, SessionError) as exc:
         _print_error(exc, as_json)
         raise typer.Exit(code=1) from exc
-    _print_result(result, as_json)
+    _print_result(result, as_json, progress)
     if result.status != "succeeded":
         raise typer.Exit(code=_exit_code(result))
 
@@ -237,6 +251,9 @@ async def _interactive(config_path: Path, *, session_id: str | None, workdir: Pa
         color_depth=ColorDepth.DEPTH_4_BIT,
     ) if sys.stdin.isatty() and sys.stdout.isatty() else None
     pending = await get_pending_approvals(config, session.session_id) if session else None
+    # progress 实例的生命周期 = 本进程内一次用户输入的交互链（ask + 其引发的各轮审批 resume），
+    # 模型调用计数因此随输入重置、跨审批 resume 连续
+    progress: CliProgress | None = None
     while True:
         if pending is not None and pending.interrupts:
             if prompt is None or pending.session_status == "closed":
@@ -247,9 +264,12 @@ async def _interactive(config_path: Path, *, session_id: str | None, workdir: Pa
             decisions = await _collect_approvals(pending)
             if decisions is None:
                 break
-            result = await resume(config, session.session_id, decisions)
+            if progress is None:
+                progress = CliProgress()
+            result = await resume(config, session.session_id, decisions, callbacks=[progress])
             if result.status != "interrupted":
-                _print_result(result, False)
+                _print_result(result, False, progress)
+                progress = None
             pending = await get_pending_approvals(config, session.session_id)
             continue
         try:
@@ -290,12 +310,15 @@ async def _interactive(config_path: Path, *, session_id: str | None, workdir: Pa
         try:
             if session is None:
                 session = create_session(config, workdir=str(workdir) if workdir else None)
-            result = await ask(config, session.session_id, text)
+            progress = CliProgress()
+            result = await ask(config, session.session_id, text, callbacks=[progress])
             if result.interrupts:
                 pending = ApprovalStatus(**{key: getattr(result, key) for key in ApprovalStatus.model_fields})
             else:
-                _print_result(result, False)
+                _print_result(result, False, progress)
+                progress = None
         except (ConfigError, SessionError, SessionBusy) as exc:
+            progress = None
             typer.echo(f"Error: {exc}", err=True)
 
     if session is not None and session.meta.status == "running":
@@ -303,6 +326,7 @@ async def _interactive(config_path: Path, *, session_id: str | None, workdir: Pa
 
 
 async def _collect_approvals(pending: ApprovalStatus) -> dict | None:
+    _print_approval_header(pending)
     prompt = PromptSession(
         output=create_output(stdout=sys.stderr),
         style=APPROVAL_PROMPT_STYLE,

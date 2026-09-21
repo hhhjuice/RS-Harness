@@ -1,5 +1,6 @@
 import asyncio
 import json
+from uuid import uuid4
 
 import pytest
 from typer.testing import CliRunner
@@ -74,6 +75,264 @@ def test_print_action_escapes_bash_control_characters(capsys):
     assert "\\n" in output
 
 
+def test_cli_progress_previews_tools_without_sensitive_values(capsys):
+    from rs_harness.progress import CliProgress
+
+    async def run():
+        progress = CliProgress()
+        run_id = uuid4()
+        await progress.on_tool_start(
+            {"name": "bash"}, "", run_id=run_id,
+            inputs={"command": "printf '\x1b'; API_KEY=secret-value"},
+        )
+        await progress.on_tool_end("secret output", run_id=run_id)
+        write_run = uuid4()
+        await progress.on_tool_start(
+            {"name": "write_file"}, "", run_id=write_run,
+            inputs={"path": "note.txt", "content": "private content"},
+        )
+        await progress.on_tool_end("done", run_id=write_run)
+        long_run = uuid4()
+        await progress.on_tool_start(
+            {"name": "bash"}, "", run_id=long_run,
+            inputs={"command": "x" * 1000},
+        )
+        await progress.on_tool_end("done", run_id=long_run)
+
+    asyncio.run(run())
+    output = capsys.readouterr().err
+    assert "[工具] bash" in output
+    assert "secret-value" not in output
+    assert "\\u001b" in output
+    assert "secret output" not in output
+    assert "private content" not in output
+    assert output.count('"path":"note.txt"') == 2
+    assert output.count("15 字符") == 2
+    assert output.count("…") == 2
+    assert max(map(len, output.splitlines())) < 200
+    assert "\x1b" not in output
+
+
+@pytest.mark.parametrize("command", [
+    "OPENAI_API_KEY=credential1 python job.py",
+    "AWS_SECRET_ACCESS_KEY=credential1 python job.py",
+    "app_access_token=credential1 python job.py",
+    "client --api-key=credential1",
+    "API_KEY='credential1 credential2' python job.py",
+    'API_KEY="credential1 credential2" python job.py',
+    r"API_KEY=credential1\ credential2 python job.py",
+    r'API_KEY="credential1\" credential2" python job.py',
+    "API_KEY='credential1'\" credential2\" python job.py",
+    "API_KEY=credential1; PASSWORD=credential2 python job.py",
+    "curl -H 'Authorization: Bearer credential1 credential2' https://example.com",
+    'curl --header "authorization: Basic credential1" https://example.com',
+    "curl --header='Authorization: Bearer credential1' https://example.com",
+    "curl -H'Authorization: Bearer credential1' https://example.com",
+    r"curl -H Authorization:\ Bearer\ credential1 https://example.com",
+])
+@pytest.mark.parametrize("outcome", ["success", "error_status", "exception"])
+async def test_tool_notices_reuse_redacted_operation(capsys, command, outcome):
+    from langchain_core.messages import ToolMessage
+    from rs_harness.progress import CliProgress
+
+    progress = CliProgress()
+    run_id = uuid4()
+    inputs = {"command": command}
+    await progress.on_tool_start({"name": "bash"}, "", run_id=run_id, inputs=inputs)
+    assert inputs == {"command": command}
+    inputs["command"] = "changed after start"
+    if outcome == "success":
+        await progress.on_tool_end("private result", run_id=run_id)
+    elif outcome == "error_status":
+        await progress.on_tool_end(ToolMessage(content="failed", tool_call_id="call", status="error"), run_id=run_id)
+    else:
+        await progress.on_tool_error(RuntimeError("failed"), run_id=run_id)
+
+    output = capsys.readouterr().err
+    start, end = output.splitlines()
+    summary = start.split(" · 开始 ", 1)[1]
+    assert "[redacted]" in summary
+    assert "credential1" not in output
+    assert "credential2" not in output
+    assert "changed after start" not in output
+    assert "private result" not in output
+    assert len(summary) <= 160
+    if outcome == "success":
+        assert " · 完成 (" in end
+        assert end.endswith(") " + summary)
+    else:
+        kind = "ToolError" if outcome == "error_status" else "RuntimeError"
+        assert " · 失败 (" in end
+        assert end.endswith(f") {summary} ({kind}): failed")
+
+
+@pytest.mark.parametrize("command", [
+    "API_KEY='credential1 credential2",
+    'API_KEY="credential1 credential2',
+    "API_KEY=credential1\\",
+    "API_KEY=$(printf 'credential1 credential2') python job.py",
+    "API_KEY=`printf 'credential1 credential2'` python job.py",
+    "bash -c 'export API_KEY=credential1; python job.py'",
+    'curl -H "Authorization: Bearer credential1',
+])
+def test_ambiguous_secret_boundary_hides_command(command):
+    from rs_harness.progress import _arguments
+
+    assert json.loads(_arguments({"command": command})) == {"command": "[redacted command]"}
+
+
+@pytest.mark.parametrize("command", [
+    "ls -la /Users/hgz/WorkSpace/RS-Harness/ 2>&1 | head -40",
+    "ls -la /Users/hgz/WorkSpace/ 2>&1 | head -40",
+    "printf '%s\\n' 'hello world' && ls *.txt",
+])
+async def test_tool_notices_preserve_non_sensitive_operation(capsys, command):
+    from rs_harness.progress import CliProgress
+
+    progress = CliProgress()
+    run_id = uuid4()
+    await progress.on_tool_start({"name": "bash"}, "", run_id=run_id, inputs={"command": command})
+    await progress.on_tool_end("done", run_id=run_id)
+
+    start, end = capsys.readouterr().err.splitlines()
+    summary = json.dumps({"command": command}, ensure_ascii=False, separators=(",", ":"))
+    assert start == "[工具] bash · 开始 " + summary
+    assert end.endswith(") " + summary)
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_ask_progress_stays_on_stderr(config, tmp_path, monkeypatch, as_json):
+    from langchain_core.messages import AIMessage
+    from rs_harness import application, cli
+    from tests.models import ScriptedModel
+
+    model = ScriptedModel([
+        AIMessage(content="private reasoning", tool_calls=[{
+            "name": "write_file", "args": {"path": "note.txt", "content": "private file body"},
+            "id": "write", "type": "tool_call",
+        }]),
+        AIMessage(content="done"),
+    ])
+
+    async def ask_with_model(config, session_id, text, **kwargs):
+        return await application.ask(config, session_id, text, model=model, **kwargs)
+
+    monkeypatch.setattr(cli, "ask", ask_with_model)
+    arguments = ["ask", "write", "--config", str(tmp_path / "config.toml"), "--workdir", str(tmp_path)]
+    result = CliRunner().invoke(app, arguments + (["--json"] if as_json else []))
+
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "note.txt").read_text() == "private file body"
+    if as_json:
+        assert json.loads(result.stdout)["answer"] == "done"
+        assert result.stderr == ""
+    else:
+        assert result.stdout == "done\n"
+        assert "[工具] write_file · 开始" in result.stderr
+        assert "[工具] write_file · 完成" in result.stderr
+        assert "[中间件]" not in result.stderr
+        assert "[模型] 第 2 次调用" in result.stderr
+        assert "note.txt" in result.stderr
+    assert "private reasoning" not in result.stderr
+    assert "private file body" not in result.stderr
+
+
+def test_resume_prints_progress_for_approved_tool(config, tmp_path, monkeypatch):
+    from langchain_core.messages import AIMessage
+    from rs_harness import application, cli
+    from tests.models import ScriptedModel
+
+    (tmp_path / "remove.txt").write_text("remove")
+    model = ScriptedModel([
+        AIMessage(content="", tool_calls=[{
+            "name": "bash", "args": {"command": "rm remove.txt"}, "id": "remove", "type": "tool_call",
+        }]),
+        AIMessage(content="done"),
+    ])
+    session = application.create_session(config, workdir=str(tmp_path))
+    pending = asyncio.run(application.ask(config, session.session_id, "remove", model=model))
+    decisions = tmp_path / "decisions.json"
+    decisions.write_text(json.dumps({pending.interrupts[0]["id"]: {"decisions": [{"type": "approve"}]}}))
+
+    async def resume_with_model(config, session_id, decisions, **kwargs):
+        return await application.resume(config, session_id, decisions, model=model, **kwargs)
+
+    monkeypatch.setattr(cli, "resume", resume_with_model)
+    result = CliRunner().invoke(app, [
+        "resume", "--config", str(tmp_path / "config.toml"), "--session-id", session.session_id,
+        "--decisions-file", str(decisions),
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert not (tmp_path / "remove.txt").exists()
+    assert result.stdout == "done\n"
+    assert "[工具] bash · 开始" in result.stderr
+    assert "[工具] bash · 完成" in result.stderr
+    assert result.stderr.count("审批结果：批准 1 项，拒绝 0 项") == 1
+
+
+def test_approval_notices_follow_applied_decisions_and_new_interrupts(config, tmp_path, monkeypatch):
+    from langchain_core.messages import AIMessage
+    from rs_harness import application, cli
+    from tests.models import ScriptedModel
+
+    for name in ("one", "two", "three"):
+        (tmp_path / name).write_text("keep")
+
+    def remove(name):
+        return {"name": "bash", "args": {"command": f"rm {name}"}, "id": name, "type": "tool_call"}
+
+    model = ScriptedModel([
+        AIMessage(content="", tool_calls=[remove("one"), remove("two")]),
+        AIMessage(content="", tool_calls=[remove("three")]),
+        AIMessage(content="done"),
+    ])
+
+    async def ask_with_model(config, session_id, text, **kwargs):
+        return await application.ask(config, session_id, text, model=model, **kwargs)
+
+    async def resume_with_model(config, session_id, decisions, **kwargs):
+        return await application.resume(config, session_id, decisions, model=model, **kwargs)
+
+    monkeypatch.setattr(cli, "ask", ask_with_model)
+    monkeypatch.setattr(cli, "resume", resume_with_model)
+    runner = CliRunner()
+    options = ["--config", str(tmp_path / "config.toml")]
+    pending = runner.invoke(app, ["ask", "remove", *options, "--workdir", str(tmp_path)])
+    assert pending.exit_code == 2, pending.output
+    assert pending.stderr.count("等待审批（2 项）") == 1
+    assert "[工具]" not in pending.stderr
+    session = SessionCatalog.list(config)[0]
+    options += ["--session-id", session.session_id]
+    decisions_file = tmp_path / "decisions.json"
+    decisions_file.write_text(json.dumps({"stale": {"decisions": [{"type": "approve"}]}}))
+    arguments = ["resume", *options, "--decisions-file", str(decisions_file)]
+    invalid = runner.invoke(app, arguments)
+    assert invalid.exit_code == 1
+    assert "审批结果" not in invalid.stderr
+    assert model.call_count == 1
+
+    status = asyncio.run(application.get_pending_approvals(config, session.session_id, model=model))
+    decisions_file.write_text(json.dumps({status.interrupts[0]["id"]: {"decisions": [{"type": "approve"}, {"type": "reject"}]}}))
+    resumed = runner.invoke(app, arguments)
+    assert resumed.exit_code == 2, resumed.output
+    assert resumed.stderr.count("审批结果：批准 1 项，拒绝 1 项") == 1
+    assert resumed.stderr.count("等待审批（1 项）") == 1
+    assert resumed.stderr.index("审批结果") < resumed.stderr.index("[工具]") < resumed.stderr.index("等待审批")
+    assert "失败" not in resumed.stderr
+    assert not (tmp_path / "one").exists()
+    assert (tmp_path / "two").exists()
+
+    status = asyncio.run(application.get_pending_approvals(config, session.session_id, model=model))
+    decisions_file.write_text(json.dumps({status.interrupts[0]["id"]: {"decisions": [{"type": "reject"}]}}))
+    finished = runner.invoke(app, arguments)
+    assert finished.exit_code == 0, finished.output
+    assert finished.stderr.count("审批结果：批准 0 项，拒绝 1 项") == 1
+    assert "[工具]" not in finished.stderr
+    assert "等待审批" not in finished.stderr
+    assert (tmp_path / "three").exists()
+
+
 def test_cli_image_only_and_resume_keep_workdir(config, tmp_path, monkeypatch):
     from langchain_core.messages import AIMessage
     from rs_harness import application, cli
@@ -84,8 +343,8 @@ def test_cli_image_only_and_resume_keep_workdir(config, tmp_path, monkeypatch):
     write_test_image(workdir / "sample.png")
     model = ScriptedModel([AIMessage(content="seen"), AIMessage(content="remembered")])
 
-    async def ask_with_model(loaded_config, session_id, text):
-        return await application.ask(loaded_config, session_id, text, model=model)
+    async def ask_with_model(loaded_config, session_id, text, **kwargs):
+        return await application.ask(loaded_config, session_id, text, model=model, **kwargs)
 
     monkeypatch.setattr(cli, "ask", ask_with_model)
     monkeypatch.chdir(tmp_path)
@@ -146,8 +405,8 @@ def test_pipe_never_consumes_next_line_as_approval(config, tmp_path, monkeypatch
     model = ScriptedModel([AIMessage(content="", tool_calls=[{
         "name": "bash", "args": {"command": "rm file.txt"}, "id": "delete", "type": "tool_call",
     }])])
-    async def ask_with_model(config, session_id, text):
-        return await application.ask(config, session_id, text, model=model)
+    async def ask_with_model(config, session_id, text, **kwargs):
+        return await application.ask(config, session_id, text, model=model, **kwargs)
     monkeypatch.setattr(cli, "ask", ask_with_model)
     if already_pending:
         asyncio.run(ask_with_model(config, session.session_id, "run"))
@@ -157,6 +416,8 @@ def test_pipe_never_consumes_next_line_as_approval(config, tmp_path, monkeypatch
     assert result.exit_code == 2, result.output
     assert "Action 1:" not in result.output
     assert "rm file.txt" in result.stderr
+    assert result.stderr.count("等待审批（1 项）") == 1
+    assert "审批结果" not in result.stderr
     assert (tmp_path / "file.txt").read_text() == "keep"
     assert model.call_count == 1
     assert SessionCatalog.open(config, session.session_id).meta.status == "running"
@@ -170,8 +431,8 @@ def test_ask_json_reports_pending_gate(config, tmp_path, monkeypatch):
     model = ScriptedModel([AIMessage(content="", tool_calls=[{
         "name": "bash", "args": {"command": "rm file.txt"}, "id": "delete", "type": "tool_call",
     }])])
-    async def ask_with_model(config, session_id, text):
-        return await application.ask(config, session_id, text, model=model)
+    async def ask_with_model(config, session_id, text, **kwargs):
+        return await application.ask(config, session_id, text, model=model, **kwargs)
     monkeypatch.setattr(cli, "ask", ask_with_model)
     options = ["--config", str(tmp_path / "config.toml"), "--json"]
     first = CliRunner().invoke(app, ["ask", "remove", *options, "--workdir", str(tmp_path)])
@@ -197,8 +458,8 @@ def test_resume_json_can_pause_again(config, tmp_path, monkeypatch):
     ])
     session = application.create_session(config, workdir=str(tmp_path))
     first = asyncio.run(application.ask(config, session.session_id, "run", model=model))
-    async def resume_with_model(config, session_id, decisions):
-        return await application.resume(config, session_id, decisions, model=model)
+    async def resume_with_model(config, session_id, decisions, **kwargs):
+        return await application.resume(config, session_id, decisions, model=model, **kwargs)
     monkeypatch.setattr(cli, "resume", resume_with_model)
     decisions_file = tmp_path / "decisions.json"
     decisions_file.write_text(json.dumps({first.interrupts[0]["id"]: {"decisions": [{"type": "reject"}]}}))

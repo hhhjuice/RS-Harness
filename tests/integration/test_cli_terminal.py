@@ -24,7 +24,7 @@ import json
 from rs_harness import cli
 from rs_harness.application import InteractionResult
 
-async def record_input(config, session_id, text):
+async def record_input(config, session_id, text, **kwargs):
     print("RSH_INPUT=" + json.dumps(text, ensure_ascii=False), flush=True)
     return InteractionResult(
         session_id=session_id, interaction_id="test", status="succeeded",
@@ -151,6 +151,8 @@ def begin_review(terminal_cli, tmp_path):
     master, _, read_until = terminal_cli
     os.write(master, b"remove\r")
     displayed = read_until("是否执行？[yes/no]>".encode())
+    assert displayed.count("等待审批（2 项）".encode()) == 1
+    assert "审批结果".encode() not in displayed
     assert b"\x1b[0;33m" in displayed
     assert "工具: bash".encode() in displayed
     assert "操作: rm first.txt".encode() in displayed
@@ -166,13 +168,36 @@ def test_terminal_collects_all_decisions_with_no_default_approval(terminal_cli, 
     read_until("请输入 y/yes 或 n/no".encode())
     read_until("是否执行？[yes/no]>".encode())
     os.write(master, b"y\r")
-    read_until("是否执行？[yes/no]>".encode())
+    displayed = read_until("是否执行？[yes/no]>".encode())
+    assert "审批结果".encode() not in displayed
+    assert "等待审批（".encode() not in displayed
     assert (tmp_path / "first.txt").exists()
     os.write(master, b"n\r")
-    read_until(b"permission-result")
+    displayed = read_until(b"permission-result")
+    assert displayed.count("审批结果：批准 1 项，拒绝 1 项".encode()) == 1
+    assert "失败".encode() not in displayed
+    assert "[模型] 第 2 次调用".encode() in displayed
+    assert "[模型] 第 1 次调用".encode() not in displayed
     read_until(b"rsh>")
     assert not (tmp_path / "first.txt").exists()
     assert (tmp_path / "second.txt").read_text() == "keep"
+    os.write(master, b"/quit\r")
+    assert terminal_cli[1].wait(timeout=5) == 0
+
+
+@pytest.mark.parametrize("terminal_cli", [PERMISSION_SCRIPT], indirect=True)
+def test_terminal_model_count_continues_across_approval_and_resets_per_input(terminal_cli, tmp_path):
+    master, read_until = begin_review(terminal_cli, tmp_path)
+    os.write(master, b"y\r")
+    read_until("是否执行？[yes/no]>".encode())
+    os.write(master, b"n\r")
+    interaction = read_until(b"rsh>")
+    assert interaction.count("审批结果：批准 1 项，拒绝 1 项".encode()) == 1
+    assert "[模型] 第 1 次调用".encode() not in interaction
+    assert interaction.index("审批结果".encode()) < interaction.index("[模型] 第 2 次调用".encode())
+    os.write(master, b"another\r")
+    read_until("[模型] 第 1 次调用".encode())
+    read_until(b"rsh>")
     os.write(master, b"/quit\r")
     assert terminal_cli[1].wait(timeout=5) == 0
 
@@ -187,6 +212,9 @@ def test_terminal_partial_approval_is_discarded(terminal_cli, config, tmp_path, 
     os.write(master, b"y\r")
     read_until("是否执行？[yes/no]>".encode())
     os.write(master, keys)
+    displayed = read_until(b"Use rsh --session-id")
+    assert "审批结果".encode() not in displayed
+    assert "失败".encode() not in displayed
     assert terminal_cli[1].wait(timeout=5) == 0
     assert (tmp_path / "first.txt").read_text() == "keep"
     assert (tmp_path / "second.txt").read_text() == "keep"

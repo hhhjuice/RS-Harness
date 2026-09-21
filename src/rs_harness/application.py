@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
@@ -81,11 +83,12 @@ async def ask(
     text: str | HumanMessage,
     *,
     model: Any | None = None,
+    callbacks: Sequence[BaseCallbackHandler] = (),
 ) -> InteractionResult:
     message = build_human_message(text) if isinstance(text, str) else text
     validate_human_message(message)
     validate_image_messages([message], config)
-    return await _run_interaction(config, session_id, message=message, model=model)
+    return await _run_interaction(config, session_id, message=message, model=model, callbacks=callbacks)
 
 
 async def get_pending_approvals(config: Config, session_id: str, *, model: Any | None = None) -> ApprovalStatus:
@@ -102,8 +105,9 @@ async def resume(
     decisions_by_interrupt: Any,
     *,
     model: Any | None = None,
+    callbacks: Sequence[BaseCallbackHandler] = (),
 ) -> InteractionResult:
-    return await _run_interaction(config, session_id, decisions_by_interrupt=decisions_by_interrupt, model=model)
+    return await _run_interaction(config, session_id, decisions_by_interrupt=decisions_by_interrupt, model=model, callbacks=callbacks)
 
 
 async def _run_interaction(
@@ -113,6 +117,7 @@ async def _run_interaction(
     message: HumanMessage | None = None,
     decisions_by_interrupt: Any = None,
     model: Any | None = None,
+    callbacks: Sequence[BaseCallbackHandler] = (),
 ) -> InteractionResult:
     interaction_id = None
     session_status = "unknown"
@@ -146,7 +151,7 @@ async def _run_interaction(
                     event, payload = "approval_submitted", decisions
                 writer = TrajectoryWriter(session.trajectory_path, session_id=session_id, interaction_id=interaction_id)
                 writer.append(event, payload)
-                return await _invoke_agent(config, session, agent, graph_input, writer)
+                return await _invoke_agent(config, session, agent, graph_input, writer, callbacks)
     except GraphBubbleUp:
         raise
     except SessionError as exc:
@@ -184,13 +189,16 @@ def _approval_failure(pending: ApprovalStatus, code: str, message: str) -> Inter
     return InteractionResult(**pending.model_dump(), status="failed", error={"type": code, "message": message})
 
 
-async def _invoke_agent(config: Config, session: Session, agent, graph_input, writer: TrajectoryWriter) -> InteractionResult:
+async def _invoke_agent(
+    config: Config, session: Session, agent, graph_input, writer: TrajectoryWriter,
+    callbacks: Sequence[BaseCallbackHandler] = (),
+) -> InteractionResult:
     try:
         result = await agent.ainvoke(
             graph_input,
             config={
                 "configurable": {"thread_id": session.session_id},
-                "callbacks": [TrajectoryRecorder(writer)],
+                "callbacks": [TrajectoryRecorder(writer), *callbacks],
                 "metadata": {"interaction_id": writer.interaction_id},
                 "run_name": "rsh_agent",
             },
