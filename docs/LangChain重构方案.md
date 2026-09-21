@@ -1,6 +1,6 @@
 # RS-Harness LangChain 重构方案
 
-日期：2026-09-20｜状态：阶段 1—4 已完成，v0.0.4 共确认离线测试 281 项、真实模型验收 12 项通过；阶段 5—6 尚未实现
+日期：2026-09-20｜状态：阶段 1—5 已完成，v0.0.5 离线测试 335 项、真实模型验收 14 项通过；阶段 6 尚未实现
 
 ## 1. 目标与范围
 
@@ -225,6 +225,7 @@ RS-Harness/
 - 第二阶段的具体改动、接口约定与验收矩阵及实施记录见 [`v0.0.2——AgentMiddleware 扩展.md`](./v0.0.2——AgentMiddleware%20扩展.md)；审查问题已修复，开发完成，离线回归 62 项通过；真实模型冒烟此前连接失败，本次联网复验因自动审批服务 503 未执行。
 - 第三阶段的工具契约、多模态入口、验收矩阵和实施记录见 [`v0.0.3——五种基础工具接入与多模态输入.md`](./v0.0.3——五种基础工具接入与多模态输入.md)；五工具、轨迹、本地/URL 图片及恢复已实现，离线回归 134 项、真实模型 6 项通过，含阶段二能力在当前版本的三轮文本复验。
 - 第四阶段的审批策略、应用与 CLI 契约、实施步骤及验收矩阵见 [`v0.0.4——Permission 机制.md`](./v0.0.4——Permission%20机制.md)；危险操作条件审批、硬拒绝、外部文件授权、CLI 查询及恢复已实现，共确认离线测试 281 项、DeepSeek Flash 真实模型验收 12 项通过，含既有能力复验。
+- 第五阶段的官方 Todo 契约、教程参考边界、Middleware 接线顺序及验收矩阵见 [`v0.0.5——任务规划能力.md`](./v0.0.5——任务规划能力.md)；官方任务规划、状态恢复及组合行为已实现，离线测试 335 项、DeepSeek Flash 真实模型验收 14 项通过，包含跨进程计划续接及既有能力复验。
 - 第三阶段在临时工作目录中验证工具；第四阶段完成面向用户的人工审批流程，不为开发阶段增加绕过审批的运行开关。
 - 任务规划本身不强依赖 Permission，仍按给定顺序独立验收；SubAgent 放在最后，以复用已经验证的工具、middleware、审批和记录机制。
 
@@ -263,4 +264,4 @@ RS-Harness/
 - [Subagents](https://docs.langchain.com/oss/python/langchain/multi-agent/subagents)：子Agent作为工具、默认调用级上下文隔离及继承Checkpointer。
 - [Short-term memory](https://docs.langchain.com/oss/python/langchain/short-term-memory)、[Persistence](https://docs.langchain.com/oss/python/langgraph/persistence)：框架维护同thread上下文，Checkpointer与跨thread Store职责不同；SQLite异步接线在第一阶段验证。
 
-阶段 1 已完成基本对话、会话与持久化；阶段 2 已完成 middleware、预算和 runtime context。阶段 3 已实现五工具、官方工具错误处理、工具 callback 和标准多模态输入。阶段 4 已实现条件审批与跨进程恢复，当前版本已用 DeepSeek Flash 复验真实工具、文本、图片、危险 Bash 和外部文件批准/拒绝。callback 签名和多模态序列化以第三阶段实施记录中的锁定版本验证为准；预算按每次 ainvoke 执行段限制，恢复获得新预算。阶段 5—6 仍待实施，嵌套中断与子调用 callback 在第六阶段验证。记录器继续只做轻量本地适配，不扩展为旧 RSH 上下文引擎或审计系统。
+阶段 1 已完成基本对话、会话与持久化；阶段 2 已完成 middleware、预算和 runtime context。阶段 3 已实现五工具、官方工具错误处理、工具 callback 和标准多模态输入。阶段 4 已实现条件审批与跨进程恢复，当前版本已用 DeepSeek Flash 复验真实工具、文本、图片、危险 Bash 和外部文件批准/拒绝。阶段 5 已接入官方 Todo middleware，验证清单更新、非法输入保护、SQLite 恢复、审批及 Stop Hook 组合，并完成真实模型规划与跨进程续接。callback 签名和多模态序列化以第三阶段实施记录中的锁定版本验证为准；预算按每次 ainvoke 执行段限制，恢复获得新预算。阶段 6 仍待实施，嵌套中断与子调用 callback 在第六阶段验证。记录器继续只做轻量本地适配，不扩展为旧 RSH 上下文引擎或审计系统。

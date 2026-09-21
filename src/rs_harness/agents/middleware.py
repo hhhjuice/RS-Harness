@@ -7,7 +7,7 @@ from inspect import isawaitable
 from pathlib import Path
 from typing import Literal
 
-from langchain.agents.middleware import AgentMiddleware, HumanInTheLoopMiddleware, ModelCallLimitMiddleware, ToolErrorMiddleware, hook_config
+from langchain.agents.middleware import AgentMiddleware, HumanInTheLoopMiddleware, ModelCallLimitMiddleware, TodoListMiddleware, ToolErrorMiddleware, hook_config
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.tools import ToolException
 
@@ -125,5 +125,6 @@ def build_middleware(config: Config) -> list[AgentMiddleware]:
         ToolDenyMiddleware(),
         ToolErrorMiddleware(on_error=_tool_error),
         ImageInputMiddleware(config),
+        TodoListMiddleware(),
         StopHookMiddleware(),
     ]

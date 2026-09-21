@@ -11,6 +11,7 @@ from langchain.agents.middleware import (
     AgentState,
     HumanInTheLoopMiddleware,
     ModelCallLimitMiddleware,
+    TodoListMiddleware,
 )
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain.tools import ToolRuntime, tool
@@ -365,11 +366,12 @@ def test_production_agent_factory_wires_middleware_and_context(config, monkeypat
     assert captured["context_schema"] is AgentContext
     assert captured["checkpointer"] == "checkpoint"
     assert {tool.name for tool in captured["tools"]} == {"read_file", "write_file", "edit_file", "glob", "bash"}
-    assert len(captured["middleware"]) == 6
+    assert len(captured["middleware"]) == 7
     assert isinstance(captured["middleware"][0], HumanInTheLoopMiddleware)
     assert isinstance(captured["middleware"][1], ModelCallLimitMiddleware)
     assert captured["middleware"][1].run_limit == config.runtime.max_model_calls
     assert captured["middleware"][1].exit_behavior == "error"
+    assert isinstance(captured["middleware"][-2], TodoListMiddleware)
     assert isinstance(captured["middleware"][-1], StopHookMiddleware)
     assert captured["middleware"][-1].hooks == ()
 
