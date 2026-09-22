@@ -53,7 +53,7 @@ class RecordingStream(io.StringIO):
 
 
 @pytest.mark.asyncio
-async def test_tool_start_is_reported_before_side_effect(config, tmp_path, monkeypatch):
+async def test_tool_progress_is_reported_after_side_effect(config, tmp_path, monkeypatch):
     stream = RecordingStream()
     monkeypatch.setattr("rs_harness.progress.sys.stderr", stream)
     observed: list[str] = []
@@ -76,12 +76,12 @@ async def test_tool_start_is_reported_before_side_effect(config, tmp_path, monke
 
     assert result.status == "succeeded", result.error
     assert (tmp_path / "marker").read_text(encoding="utf-8") == "done"
-    assert observed and "[工具] touch · 开始" in observed[0]
-    assert "[工具] touch · 完成" in stream.text()
+    assert observed and "[Tool]" not in observed[0]
+    assert "[Tool] Running touch (" in stream.text()
 
 
 @pytest.mark.asyncio
-async def test_parallel_tools_report_start_and_completion_in_completion_order(config, tmp_path, monkeypatch):
+async def test_parallel_tools_report_completion_in_completion_order(config, tmp_path, monkeypatch):
     stream = RecordingStream()
     monkeypatch.setattr("rs_harness.progress.sys.stderr", stream)
     fast_finished = asyncio.Event()
@@ -117,12 +117,10 @@ async def test_parallel_tools_report_start_and_completion_in_completion_order(co
 
     assert result.status == "succeeded", result.error
     output = stream.text()
-    starts = [line for line in output.splitlines() if " · 开始 " in line]
-    completions = [line for line in output.splitlines() if " · 完成 " in line]
-    assert sorted(starts) == ['[工具] inspect · 开始 {"path":"fast.txt"}', '[工具] inspect · 开始 {"path":"slow.txt"}']
+    completions = [line for line in output.splitlines() if line.startswith("[Tool] Running inspect (")]
     assert len(completions) == 2
     for line, path in zip(completions, ("fast.txt", "slow.txt"), strict=True):
-        assert line.startswith("[工具] inspect · 完成 (")
+        assert line.startswith("[Tool] Running inspect (")
         assert line.endswith(f') {{"path":"{path}"}}')
 
 
@@ -140,8 +138,8 @@ async def test_denied_and_approved_tools_report_real_execution_only(config, tmp_
     denied = await application.ask(config, session.session_id, "deny it", model=denied_model, callbacks=[CliProgress()])
     assert denied.status == "succeeded", denied.error
     assert target.exists()
-    assert "已拦截" in denied_stream.text()
-    assert "[工具]" not in denied_stream.text()
+    assert "blocked" in denied_stream.text()
+    assert "[Tool]" not in denied_stream.text()
 
     approved_stream = RecordingStream()
     monkeypatch.setattr("rs_harness.progress.sys.stderr", approved_stream)
@@ -152,17 +150,26 @@ async def test_denied_and_approved_tools_report_real_execution_only(config, tmp_
     approved_session = application.create_session(config, workdir=str(tmp_path))
     pending = await application.ask(config, approved_session.session_id, "approve it", model=approved_model, callbacks=[CliProgress()])
     assert pending.status == "interrupted", pending.error
-    assert "[工具]" not in approved_stream.text()
+    assert "[Tool]" not in approved_stream.text()
     decision = {pending.interrupts[0]["id"]: {"decisions": [{"type": "approve"}]}}
     resumed = await application.resume(config, approved_session.session_id, decision, model=approved_model, callbacks=[CliProgress()])
     assert resumed.status == "succeeded", resumed.error
     assert not target.exists()
-    assert "[工具] bash · 开始" in approved_stream.text()
+    assert "[Tool] Running bash (" in approved_stream.text()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("todos, expected", [
-    ([{"content": "Inspect input", "status": "in_progress"}], True),
+    (
+        [
+            {"content": "Inspect input", "status": "completed"},
+            {"content": "Modify target", "status": "in_progress"},
+            {"content": "Run checks", "status": "pending"},
+            {"content": "Summarize result", "status": "pending"},
+            {"content": "Clean temporary files", "status": "pending"},
+        ],
+        True,
+    ),
     ([], True),
     ([{"content": "invalid", "status": "done"}], False),
 ])
@@ -179,15 +186,16 @@ async def test_todo_progress_only_shows_successful_updates(config, tmp_path, tod
 
     assert result.status == "succeeded", result.error
     output = stream.text()
-    assert "[工具]" not in output
+    assert "[Tool]" not in output
     if expected and todos:
-        assert output.count("[计划] 已更新") == 1
-        assert "Inspect input" in output
+        assert output.count("[Todo] Updated") == 1
+        assert all(todo["content"] in output for todo in todos)
+        assert "remaining" not in output.lower()
     elif expected:
-        assert output.count("[计划] 计划已清空") == 1
+        assert output.count("[Todo] Plan cleared") == 1
     else:
-        assert output.count("[计划] 更新失败") == 1
-        assert "已更新" not in output
+        assert output.count("[Todo] Update failed") == 1
+        assert "Updated" not in output
         assert "invalid" not in output
 
 
@@ -237,7 +245,7 @@ async def test_stop_hook_continuation_reports_action_without_message_content(con
     assert result.status == "succeeded", result.error
     assert result.answer == "finished"
     output = capsys.readouterr().err
-    assert "StopHookMiddleware.after_agent · 继续调用模型" in output
+    assert "StopHookMiddleware.after_agent · continuing model execution" in output
     assert "private continuation instruction" not in output
     assert "draft" not in output
 
@@ -252,7 +260,7 @@ async def test_routine_middleware_is_silent(config, tmp_path, capsys, with_image
     )
 
     assert result.status == "succeeded", result.error
-    assert capsys.readouterr().err == "[模型] 第 1 次调用\n"
+    assert capsys.readouterr().err == "[Model] Call 1\n"
 
 
 @pytest.mark.parametrize("failure", ["budget", "image", "stop", "tool"])
@@ -262,7 +270,7 @@ async def test_fatal_error_reason_is_reported_once(config, tmp_path, monkeypatch
     if failure == "budget":
         config = config.model_copy(update={"runtime": config.runtime.model_copy(update={"max_model_calls": 1})})
         model = ScriptedModel([AIMessage(content="", tool_calls=[call("glob", {"pattern": "*.txt"}, "glob")])])
-        marker = "模型调用预算已耗尽，停止继续调用"
+        marker = "Model call budget exhausted; stopping further calls"
     elif failure == "image":
         message = HumanMessage(content=[{"type": "image", "url": "https://example.com/image.png"}])
         model = ScriptedModel([AIMessage(content="unreachable")], profile={"image_inputs": False})
@@ -297,7 +305,7 @@ async def test_fatal_error_reason_is_reported_once(config, tmp_path, monkeypatch
     output = capsys.readouterr().err
     assert output.count(marker) == 1
     assert output.count(result.error["type"]) == 1
-    assert output.count("本轮执行失败") == 1
+    assert output.count("This run failed.") == 1
 
 
 @pytest.mark.parametrize("error_message", [False, True])
@@ -321,10 +329,10 @@ async def test_handled_tool_error_has_one_notice_and_agent_can_continue(config, 
     assert result.status == "succeeded", result.error
     output = capsys.readouterr()
     assert output.out == "recovered\n"
-    assert output.err.count("失败") == 1
+    assert output.err.count("Failed") == 1
     assert output.err.count("ToolError" if error_message else "ToolException") == 1
     assert "missing.txt" in output.err
-    failure = next(line for line in output.err.splitlines() if " · 失败 " in line)
+    failure = next(line for line in output.err.splitlines() if line.startswith("[Tool] Failed read_file ("))
     assert ') {"path":"missing.txt"} (' in failure
     assert "ToolErrorMiddleware" not in output.err
 
@@ -339,10 +347,10 @@ async def test_duplicate_plan_calls_have_one_rejection_notice(config, tmp_path, 
 
     assert result.status == "succeeded", result.error
     output = capsys.readouterr().err
-    assert output.count("[计划] 更新被拒绝") == 1
-    assert "[工具]" not in output
-    assert "计划已清空" not in output
-    assert "已更新" not in output
+    assert output.count("[Todo] Update rejected") == 1
+    assert "[Tool]" not in output
+    assert "Plan cleared" not in output
+    assert "Updated" not in output
 
 
 @pytest.mark.parametrize("signal", [asyncio.CancelledError, GraphBubbleUp])
@@ -390,9 +398,9 @@ async def test_control_flow_is_not_reported_as_failure(config, tmp_path, monkeyp
         await asyncio.gather(task, return_exceptions=True)
 
     output = capsys.readouterr().err
-    assert "失败" not in output
-    assert "完成" not in output
-    assert "[中间件]" not in output
+    assert "failed" not in output
+    assert "Running" not in output
+    assert "[Middleware]" not in output
 
 
 @pytest.mark.parametrize("feedback", [None, ""])
@@ -410,4 +418,4 @@ async def test_stop_hook_without_continuation_is_silent(config, tmp_path, monkey
     )
 
     assert result.status == "succeeded", result.error
-    assert capsys.readouterr().err == "[模型] 第 1 次调用\n"
+    assert capsys.readouterr().err == "[Model] Call 1\n"

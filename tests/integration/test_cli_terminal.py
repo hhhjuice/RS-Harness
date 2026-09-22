@@ -150,12 +150,12 @@ def begin_review(terminal_cli, tmp_path):
         (tmp_path / name).write_text("keep")
     master, _, read_until = terminal_cli
     os.write(master, b"remove\r")
-    displayed = read_until("是否执行？[yes/no]>".encode())
-    assert displayed.count("等待审批（2 项）".encode()) == 1
-    assert "审批结果".encode() not in displayed
+    displayed = read_until("Execute? [yes/no]>".encode())
+    assert displayed.count("Waiting for approval (2 items)".encode()) == 1
+    assert "Decisions:".encode() not in displayed
     assert b"\x1b[0;33m" in displayed
-    assert "工具: bash".encode() in displayed
-    assert "操作: rm first.txt".encode() in displayed
+    assert "Tool: bash".encode() in displayed
+    assert "Operation: rm first.txt".encode() in displayed
     assert b'"workdir"' not in displayed
     assert b'"id"' not in displayed
     return master, read_until
@@ -165,19 +165,19 @@ def begin_review(terminal_cli, tmp_path):
 def test_terminal_collects_all_decisions_with_no_default_approval(terminal_cli, tmp_path):
     master, read_until = begin_review(terminal_cli, tmp_path)
     os.write(master, b"\r")
-    read_until("请输入 y/yes 或 n/no".encode())
-    read_until("是否执行？[yes/no]>".encode())
+    read_until("Enter y/yes or n/no.".encode())
+    read_until("Execute? [yes/no]>".encode())
     os.write(master, b"y\r")
-    displayed = read_until("是否执行？[yes/no]>".encode())
-    assert "审批结果".encode() not in displayed
-    assert "等待审批（".encode() not in displayed
+    displayed = read_until("Execute? [yes/no]>".encode())
+    assert "Decisions:".encode() not in displayed
+    assert "Waiting for approval (".encode() not in displayed
     assert (tmp_path / "first.txt").exists()
     os.write(master, b"n\r")
     displayed = read_until(b"permission-result")
-    assert displayed.count("审批结果：批准 1 项，拒绝 1 项".encode()) == 1
-    assert "失败".encode() not in displayed
-    assert "[模型] 第 2 次调用".encode() in displayed
-    assert "[模型] 第 1 次调用".encode() not in displayed
+    assert displayed.count("Decisions: 1 approved, 1 rejected".encode()) == 1
+    assert "failed".encode() not in displayed
+    assert "[Model] Call 2".encode() in displayed
+    assert "[Model] Call 1".encode() not in displayed
     read_until(b"rsh>")
     assert not (tmp_path / "first.txt").exists()
     assert (tmp_path / "second.txt").read_text() == "keep"
@@ -189,14 +189,14 @@ def test_terminal_collects_all_decisions_with_no_default_approval(terminal_cli, 
 def test_terminal_model_count_continues_across_approval_and_resets_per_input(terminal_cli, tmp_path):
     master, read_until = begin_review(terminal_cli, tmp_path)
     os.write(master, b"y\r")
-    read_until("是否执行？[yes/no]>".encode())
+    read_until("Execute? [yes/no]>".encode())
     os.write(master, b"n\r")
     interaction = read_until(b"rsh>")
-    assert interaction.count("审批结果：批准 1 项，拒绝 1 项".encode()) == 1
-    assert "[模型] 第 1 次调用".encode() not in interaction
-    assert interaction.index("审批结果".encode()) < interaction.index("[模型] 第 2 次调用".encode())
+    assert interaction.count("Decisions: 1 approved, 1 rejected".encode()) == 1
+    assert "[Model] Call 1".encode() not in interaction
+    assert interaction.index("Decisions:".encode()) < interaction.index("[Model] Call 2".encode())
     os.write(master, b"another\r")
-    read_until("[模型] 第 1 次调用".encode())
+    read_until("[Model] Call 1".encode())
     read_until(b"rsh>")
     os.write(master, b"/quit\r")
     assert terminal_cli[1].wait(timeout=5) == 0
@@ -210,11 +210,11 @@ def test_terminal_partial_approval_is_discarded(terminal_cli, config, tmp_path, 
 
     master, read_until = begin_review(terminal_cli, tmp_path)
     os.write(master, b"y\r")
-    read_until("是否执行？[yes/no]>".encode())
+    read_until("Execute? [yes/no]>".encode())
     os.write(master, keys)
     displayed = read_until(b"Use rsh --session-id")
-    assert "审批结果".encode() not in displayed
-    assert "失败".encode() not in displayed
+    assert "Decisions:".encode() not in displayed
+    assert "failed".encode() not in displayed
     assert terminal_cli[1].wait(timeout=5) == 0
     assert (tmp_path / "first.txt").read_text() == "keep"
     assert (tmp_path / "second.txt").read_text() == "keep"
@@ -229,10 +229,10 @@ def test_terminal_treats_slash_commands_as_invalid_approval_input(terminal_cli, 
     master, read_until = begin_review(terminal_cli, tmp_path)
     for command in (b"/status\r", b"/close\r", b"/quit\r"):
         os.write(master, command)
-        read_until("请输入 y/yes 或 n/no".encode())
-        read_until("是否执行？[yes/no]>".encode())
+        read_until("Enter y/yes or n/no.".encode())
+        read_until("Execute? [yes/no]>".encode())
     os.write(master, b"n\r")
-    read_until("是否执行？[yes/no]>".encode())
+    read_until("Execute? [yes/no]>".encode())
     os.write(master, b"n\r")
     read_until(b"permission-result")
     read_until(b"rsh>")
@@ -260,14 +260,14 @@ cli.main()
 ''')
 
 
-@pytest.mark.parametrize("terminal_cli", [{"script": PERMISSION_STARTUP_SCRIPT, "marker": "是否执行？[yes/no]>".encode()}], indirect=True, ids=["pending-startup"])
+@pytest.mark.parametrize("terminal_cli", [{"script": PERMISSION_STARTUP_SCRIPT, "marker": "Execute? [yes/no]>".encode()}], indirect=True, ids=["pending-startup"])
 def test_terminal_opens_existing_approval_before_accepting_text(terminal_cli, config, tmp_path):
     master, process, read_until = terminal_cli
     os.write(master, b"this must not become a new question\r")
-    read_until("请输入 y/yes 或 n/no".encode())
-    read_until("是否执行？[yes/no]>".encode())
+    read_until("Enter y/yes or n/no.".encode())
+    read_until("Execute? [yes/no]>".encode())
     os.write(master, b"y\r")
-    read_until("是否执行？[yes/no]>".encode())
+    read_until("Execute? [yes/no]>".encode())
     os.write(master, b"n\r")
     read_until(b"permission-result")
     read_until(b"rsh>")

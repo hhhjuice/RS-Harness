@@ -33,6 +33,8 @@ uv run rsh ask --config config/default.toml --image ./sample.png "描述图片"
 uv run rsh ask --config config/default.toml --image ./sample.png --json
 ```
 
+`--config`、`--session-id` 和 `--workdir` 可放在子命令前后。放在子命令前时作为缺省值，子命令上的显式参数优先。
+
 `--image` 可重复使用，图片和文本组成同一条标准消息；省略文本可提交仅图片输入。新会话的相对图片路径按 `--workdir` 或当前目录解析，续聊按 session 原工作目录解析。用户明确指定的绝对图片路径可以位于工作目录外。输入无效时不会创建新会话；`ask --json` 返回 JSON，错误退出码为 1。
 
 本地图片按文件内容识别 JPEG、PNG、GIF、WebP，编码为带 MIME 的 base64 标准内容块。图片数据随 SQLite 保存，原文件删除后仍可续聊；HTTP(S) URL 直接交给 provider 获取，恢复后仍依赖 URL 可达。交互模式可用 `--session-id` 继续图片会话，图片提交入口目前为 `ask --image`。
@@ -58,28 +60,11 @@ Permission 按 `deny → ask → allow` 判定，使用官方 `HumanInTheLoopMid
 
 Bash 使用区分大小写的字面子串规则，例如 `rm -rf /tmp/demo` 也被硬拒绝。引号中的关键词可能误报，空白变化或脚本间接执行可能漏报；此策略不提供 Shell 语义分析或 OS 隔离。文件审批属于 Agent 调用链，直接调用 Python 工具函数不经过审批。审批不保存长期授权；文件类型、OS 权限、超时等仍可能导致已批准调用失败。
 
-单次命令不弹审批提示。`ask`/`resume` 的执行退出码为成功 `0`、失败 `1`、等待审批 `2`；`--json` 的 stdout 只包含一个 JSON 对象，待审批时 `answer/error` 均为 null。待审 session 不接受新的普通问题，需要先恢复或关闭。
-
-```bash
-uv run rsh approvals --config config/default.toml --session-id <SESSION_ID> --json
-uv run rsh resume --config config/default.toml --session-id <SESSION_ID> --decisions-file decisions.json --json
-```
-
-`approvals` 只查询 Checkpoint，查询成功退出码为 0。`decisions.json` 的键取自查询结果的 interrupt ID，每项 decisions 按 action_requests 顺序对应；所有当前中断必须一次提交完整决定，仅支持 approve/reject，reject 可附字符串 message：
-
-```json
-{
-  "<interrupt-id>": {
-    "decisions": [{"type": "approve"}, {"type": "reject", "message": "请保留原文件"}]
-  }
-}
-```
-
-上例对应一个包含两项动作的中断。缺失、过期或额外 ID、数量不匹配、额外字段及重复 JSON 键都会在执行前拒绝。同批只要存在 ask，整个工具节点都会等待；allow/deny 不占 decisions 位置，恢复后仍由框架默认调度。恢复可能再次暂停，使用最新中断重新决定。
+`ask` 在 stdin 和 stderr 均为 TTY 时直接执行工具审批：显示待审批数量、工具名称和实际操作，逐项接受 `y/yes` 或 `n/no`，收齐后立即恢复执行；若恢复后再次暂停，会继续使用最新操作重新询问。`ask` 的执行退出码为成功 `0`、失败 `1`、等待审批 `2`；`--json` 的 stdout 只包含最终一个 JSON 对象，待审批时 `answer/error` 均为 null。非 TTY、管道或重定向下不消费后续输入作为批准，而是以退出码 `2` 保留暂停状态；待审 session 不接受新的普通问题，可在交互终端用 `--session-id` 继续处理或关闭。同批只要存在 ask，整个工具节点都会等待；allow/deny 不占人工决定位置，恢复后仍由框架默认调度。
 
 交互模式可连续输入多轮问题，整个交互过程共用一个异步事件循环。TTY 下普通 `rsh>` 输入提示显示为蓝色，审批输入提示显示为黄色。触发审批时显示待审批数量、工具名称和实际操作；审批阶段只接受 `y/yes` 或 `n/no`，分别对应批准或拒绝，其他输入不会改变审批状态。空输入不批准，收齐后才提交。审批期间 Ctrl+C 或 Ctrl+D 丢弃尚未提交的决定并保留暂停，之后可通过 `--session-id` 继续；普通交互阶段仍支持 `/status`、`/close`、`/quit` 和 `/exit`。审批展示和提示写入 stderr，最终回答写入 stdout。管道或重定向模式遇到待审即以 2 退出，不消费后续输入作为批准。
 
-交互模式和普通 `ask`/`resume` 会实时显示模型调用、普通工具开始与完成/失败。开始与结束通知重复显示对应操作摘要，不提供编号；摘要先脱敏再截断，最多 160 个字符，长操作的差异可能被截断。写入/编辑正文只显示长度，成功结果正文不展开。命令摘要隐藏敏感变量赋值和 Authorization 头，无法确定敏感值边界时隐藏整条命令摘要。中间件默认静默，仅在以下情况通知：
+交互模式和普通 `ask` 会实时显示模型调用与普通工具完成/失败通知。工具不在开始时单独输出，完成时输出 `[Tool] Running <tool> (<elapsed>s)` 及操作摘要；摘要先脱敏再截断，最多 160 个字符，长操作的差异可能被截断。写入/编辑正文只显示长度，成功结果正文不展开。命令摘要隐藏敏感变量赋值和 Authorization 头，无法确定敏感值边界时隐藏整条命令摘要。运行提示默认使用英文。中间件默认静默，仅在以下情况通知：
 
 | 中间件 | 显示内容 |
 | --- | --- |
@@ -88,23 +73,21 @@ uv run rsh resume --config config/default.toml --session-id <SESSION_ID> --decis
 | `HumanInTheLoopMiddleware` | CLI 展示一次待审批数量和操作；恢复且决定实际处理后，显示批准/拒绝数量 |
 | `ToolDenyMiddleware` | 实际拦截的工具名和原因 |
 | `ToolErrorMiddleware` | 合并到工具失败通知，显示错误类型和短原因 |
-| `TodoListMiddleware` | 计划更新、清空或更新被拒绝；最多展开三项，不额外打印 `write_todos` 开始/完成 |
+| `TodoListMiddleware` | 计划更新、清空或更新被拒绝；展开全部 Todo 项，不额外打印普通 `write_todos` 工具行 |
 | `StopHookMiddleware` | 要求继续执行，或检查异常 |
 
-人工拒绝表示未执行，待审批、取消及框架中断不打印为工具失败。已经显示过原因的错误若终止本轮，最终仅补充“本轮执行失败”。摘要写入 stderr，TTY 下带颜色，重定向时为纯文本；`--json` 关闭这些通知，保持 stdout 为单个 JSON 对象。展示依据实际回调和状态，不输出模型内部思维、完整消息历史或图片数据。
+人工拒绝表示未执行，待审批、取消及框架中断不打印为工具失败。已经显示过原因的错误若终止本轮，最终仅补充 `This run failed.`。摘要写入 stderr，TTY 下带颜色，重定向时为纯文本；`--json` 关闭这些通知，保持 stdout 为单个 JSON 对象。展示依据实际回调和状态，不输出模型内部思维、完整消息历史或图片数据。
 
 Python 调用默认不输出运行摘要；可向 `ask`/`resume` 传入 `callbacks=[...]` 接入 LangChain callback handler。CLI 展示与 `trajectory.jsonl` 记录各自独立，控制台写入失败不会重试工具或改变 Agent 的结果。
 
-同名工具并发时，完成顺序可能不同于开始顺序；各条通知复用该次调用开始时生成的操作摘要。例如：
+同名工具并发时，各条完成通知复用该次调用开始时生成的操作摘要，输出顺序跟随完成顺序。例如：
 
 ```text
-[工具] bash · 开始 {"command":"ls -la /Users/hgz/WorkSpace/RS-Harness/ 2>&1 | head -40"}
-[工具] bash · 开始 {"command":"ls -la /Users/hgz/WorkSpace/ 2>&1 | head -40"}
-[工具] bash · 完成 (0.02s) {"command":"ls -la /Users/hgz/WorkSpace/ 2>&1 | head -40"}
-[工具] bash · 完成 (0.03s) {"command":"ls -la /Users/hgz/WorkSpace/RS-Harness/ 2>&1 | head -40"}
+[Tool] Running bash (0.02s) {"command":"ls -la /Users/hgz/WorkSpace/ 2>&1 | head -40"}
+[Tool] Running bash (0.03s) {"command":"ls -la /Users/hgz/WorkSpace/RS-Harness/ 2>&1 | head -40"}
 ```
 
-交互模式的模型调用计数随新输入重置，同一输入引发的审批恢复继续累计；独立启动的 `ask`/`resume` 命令从 1 计数。该数字表示当前展示范围内的调用次数，执行预算仍由中间件管理。
+交互模式的模型调用计数随新输入重置，同一输入引发的审批恢复继续累计；独立启动的 `ask` 命令也保持同一输入的完整审批链路并从 1 计数。该数字表示当前展示范围内的调用次数，执行预算仍由中间件管理。
 
 终端输入支持中文编辑：左右键移动光标，Backspace/Delete 删除字符，Home/End 移至行首/行尾，上下键浏览本次运行的输入历史。历史仅保存在内存中；Enter 提交问题，输入提示符处 Ctrl+C 或空行 Ctrl+D 退出并保留会话。重定向或管道输入使用普通文本读取。
 
@@ -120,6 +103,6 @@ Python 调用默认不输出运行摘要；可向 `ask`/`resume` 传入 `callbac
 
 默认测试使用 `uv run pytest --tb=short`，自动排除 `live` 测试；配置好支持工具及视觉的模型后，使用 `uv run pytest -m live --tb=short` 验证三轮文本、五工具、图片、审批恢复及任务规划。live 仅对临时目录中核对过的预定动作批准或拒绝；会话数据写入临时目录，审批、图片恢复及计划续接使用独立进程。
 
-v0.0.5 离线测试 335 项、真实模型验收 14 项全部通过，包含规划创建、更新、跨进程续接，以及既有五工具、文本、图片与审批能力。实现及验证详情见 [阶段五实施文档](./docs/v0.0.5——任务规划能力.md)。SubAgent 按阶段六实施。
+v0.0.5 交付时离线测试 335 项、真实模型验收 14 项全部通过，包含规划创建、更新、跨进程续接，以及既有五工具、文本、图片与审批能力。实现及后续修订记录见 [阶段五实施文档](./docs/v0.0.5——任务规划能力.md)。SubAgent 按阶段六实施。
 
-Python 调用方应在同一事件循环内连续 `await ask(...)`、`await get_pending_approvals(...)` 和 `await resume(...)`。锁定版本的 langchain-openai 会缓存默认异步 HTTP 客户端，同一进程中反复用 `asyncio.run` 创建新循环可能触发 `Event loop is closed`；CLI 每次运行使用独立进程，交互模式保持同一循环。
+Python 调用方应在同一事件循环内连续 `await ask(...)`、`await get_pending_approvals(...)` 和 `await resume(...)`。锁定版本的 langchain-openai 会缓存默认异步 HTTP 客户端，同一进程中反复用 `asyncio.run` 创建新循环可能触发 `Event loop is closed`；CLI 每次运行的提问和审批恢复保持同一循环。

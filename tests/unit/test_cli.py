@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -55,6 +56,66 @@ def test_empty_ask_creates_no_session(config, tmp_path, extra):
     assert SessionCatalog.list(config) == []
 
 
+def test_root_workdir_applies_to_ask(config, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from rs_harness import application, cli
+
+    workdir = tmp_path / "requested-workdir"
+    created = []
+
+    def create_session(config, *, workdir=None):
+        created.append(workdir)
+        return SimpleNamespace(session_id="session-id")
+
+    async def ask(config, session_id, message, **kwargs):
+        return application.InteractionResult(
+            session_id=session_id, interaction_id="interaction-id",
+            status="succeeded", session_status="running", answer="done",
+        )
+
+    monkeypatch.setattr(cli, "create_session", create_session)
+    monkeypatch.setattr(cli, "ask", ask)
+    result = CliRunner().invoke(app, [
+        "--workdir", str(workdir), "ask", "hello",
+        "--config", str(tmp_path / "config.toml"),
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert created == [str(workdir)]
+
+
+def test_explicit_child_default_config_overrides_root_config(config, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from rs_harness import cli
+
+    root_config = tmp_path / "custom.toml"
+    root_config.write_text("", encoding="utf-8")
+    child_config = tmp_path / "config" / "default.toml"
+    child_config.parent.mkdir()
+    child_config.write_text("", encoding="utf-8")
+    loaded = []
+
+    def load(path):
+        loaded.append(path)
+        return config
+
+    def create_session(config, *, workdir=None):
+        return SimpleNamespace(session_id="session-id", path=tmp_path / "session")
+
+    monkeypatch.setattr(cli, "_load", load)
+    monkeypatch.setattr(cli, "create_session", create_session)
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(app, [
+        "--config", str(root_config), "create-session",
+        "--config", "config/default.toml", "--json",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert loaded == [Path("config/default.toml")]
+
+
 def test_invalid_image_json_creates_no_session(config, tmp_path):
     result = CliRunner().invoke(app, ["ask", "--config", str(tmp_path / "config.toml"), "--image", "missing.png", "--json"])
     assert result.exit_code == 1
@@ -101,14 +162,14 @@ def test_cli_progress_previews_tools_without_sensitive_values(capsys):
 
     asyncio.run(run())
     output = capsys.readouterr().err
-    assert "[工具] bash" in output
+    assert "[Tool] Running bash (" in output
     assert "secret-value" not in output
     assert "\\u001b" in output
     assert "secret output" not in output
     assert "private content" not in output
-    assert output.count('"path":"note.txt"') == 2
-    assert output.count("15 字符") == 2
-    assert output.count("…") == 2
+    assert output.count('"path":"note.txt"') == 1
+    assert output.count("15 chars") == 1
+    assert output.count("…") == 1
     assert max(map(len, output.splitlines())) < 200
     assert "\x1b" not in output
 
@@ -149,21 +210,25 @@ async def test_tool_notices_reuse_redacted_operation(capsys, command, outcome):
         await progress.on_tool_error(RuntimeError("failed"), run_id=run_id)
 
     output = capsys.readouterr().err
-    start, end = output.splitlines()
-    summary = start.split(" · 开始 ", 1)[1]
+    assert len(output.splitlines()) == 1
+    end = output.splitlines()[0]
+    summary = end.split(") ", 1)[1]
     assert "[redacted]" in summary
     assert "credential1" not in output
     assert "credential2" not in output
     assert "changed after start" not in output
     assert "private result" not in output
-    assert len(summary) <= 160
     if outcome == "success":
-        assert " · 完成 (" in end
+        assert len(summary) <= 160
+        assert "Running bash (" in end
         assert end.endswith(") " + summary)
     else:
         kind = "ToolError" if outcome == "error_status" else "RuntimeError"
-        assert " · 失败 (" in end
-        assert end.endswith(f") {summary} ({kind}): failed")
+        suffix = f" ({kind}): failed"
+        summary = summary.removesuffix(suffix)
+        assert len(summary) <= 160
+        assert "Failed bash (" in end
+        assert end.endswith(") " + summary + suffix)
 
 
 @pytest.mark.parametrize("command", [
@@ -194,9 +259,11 @@ async def test_tool_notices_preserve_non_sensitive_operation(capsys, command):
     await progress.on_tool_start({"name": "bash"}, "", run_id=run_id, inputs={"command": command})
     await progress.on_tool_end("done", run_id=run_id)
 
-    start, end = capsys.readouterr().err.splitlines()
+    output = capsys.readouterr().err
+    assert len(output.splitlines()) == 1
+    end = output.splitlines()[0]
     summary = json.dumps({"command": command}, ensure_ascii=False, separators=(",", ":"))
-    assert start == "[工具] bash · 开始 " + summary
+    assert end.startswith("[Tool] Running bash (")
     assert end.endswith(") " + summary)
 
 
@@ -228,109 +295,112 @@ def test_ask_progress_stays_on_stderr(config, tmp_path, monkeypatch, as_json):
         assert result.stderr == ""
     else:
         assert result.stdout == "done\n"
-        assert "[工具] write_file · 开始" in result.stderr
-        assert "[工具] write_file · 完成" in result.stderr
-        assert "[中间件]" not in result.stderr
-        assert "[模型] 第 2 次调用" in result.stderr
+        assert "[Tool] Running write_file (" in result.stderr
+        assert "[Middleware]" not in result.stderr
+        assert "[Model] Call 2" in result.stderr
         assert "note.txt" in result.stderr
     assert "private reasoning" not in result.stderr
     assert "private file body" not in result.stderr
 
 
-def test_resume_prints_progress_for_approved_tool(config, tmp_path, monkeypatch):
-    from langchain_core.messages import AIMessage
+def test_ask_collects_approval_and_resumes(config, tmp_path, monkeypatch):
     from rs_harness import application, cli
-    from tests.models import ScriptedModel
 
-    (tmp_path / "remove.txt").write_text("remove")
-    model = ScriptedModel([
-        AIMessage(content="", tool_calls=[{
-            "name": "bash", "args": {"command": "rm remove.txt"}, "id": "remove", "type": "tool_call",
-        }]),
-        AIMessage(content="done"),
-    ])
     session = application.create_session(config, workdir=str(tmp_path))
-    pending = asyncio.run(application.ask(config, session.session_id, "remove", model=model))
-    decisions = tmp_path / "decisions.json"
-    decisions.write_text(json.dumps({pending.interrupts[0]["id"]: {"decisions": [{"type": "approve"}]}}))
+    interrupt = {
+        "id": "interrupt-1",
+        "action_requests": [{"name": "bash", "args": {"command": "rm remove.txt"}}],
+        "review_configs": [{"allowed_decisions": ["approve", "reject"]}],
+    }
+
+    class FakePrompt:
+        async def prompt_async(self, message):
+            cli.typer.echo(message, err=True)
+            return "yes"
+
+    async def ask_with_model(config, session_id, text, **kwargs):
+        return application.InteractionResult(
+            session_id=session_id, interaction_id="interaction-1", status="interrupted",
+            session_status="running", interrupts=[interrupt],
+        )
 
     async def resume_with_model(config, session_id, decisions, **kwargs):
-        return await application.resume(config, session_id, decisions, model=model, **kwargs)
+        assert decisions == {"interrupt-1": {"decisions": [{"type": "approve"}]}}
+        return application.InteractionResult(
+            session_id=session_id, interaction_id="interaction-1", status="succeeded",
+            session_status="running", answer="done",
+        )
 
     monkeypatch.setattr(cli, "resume", resume_with_model)
+    monkeypatch.setattr(cli, "ask", ask_with_model)
+    monkeypatch.setattr(cli, "_can_collect_approvals", lambda: True)
+    monkeypatch.setattr(cli, "PromptSession", lambda **kwargs: FakePrompt())
     result = CliRunner().invoke(app, [
-        "resume", "--config", str(tmp_path / "config.toml"), "--session-id", session.session_id,
-        "--decisions-file", str(decisions),
+        "ask", "remove", "--config", str(tmp_path / "config.toml"), "--session-id", session.session_id,
     ])
 
     assert result.exit_code == 0, result.output
-    assert not (tmp_path / "remove.txt").exists()
     assert result.stdout == "done\n"
-    assert "[工具] bash · 开始" in result.stderr
-    assert "[工具] bash · 完成" in result.stderr
-    assert result.stderr.count("审批结果：批准 1 项，拒绝 0 项") == 1
+    assert "Execute? [yes/no]>" in result.stderr
+    assert "rm remove.txt" in result.stderr
 
 
-def test_approval_notices_follow_applied_decisions_and_new_interrupts(config, tmp_path, monkeypatch):
-    from langchain_core.messages import AIMessage
+def test_ask_collects_each_action_and_new_interrupts(config, tmp_path, monkeypatch):
     from rs_harness import application, cli
-    from tests.models import ScriptedModel
-
-    for name in ("one", "two", "three"):
-        (tmp_path / name).write_text("keep")
 
     def remove(name):
         return {"name": "bash", "args": {"command": f"rm {name}"}, "id": name, "type": "tool_call"}
 
-    model = ScriptedModel([
-        AIMessage(content="", tool_calls=[remove("one"), remove("two")]),
-        AIMessage(content="", tool_calls=[remove("three")]),
-        AIMessage(content="done"),
-    ])
+    first_interrupt = {
+        "id": "interrupt-1",
+        "action_requests": [remove("one"), remove("two")],
+        "review_configs": [{"allowed_decisions": ["approve", "reject"]}] * 2,
+    }
+    second_interrupt = {
+        "id": "interrupt-2",
+        "action_requests": [remove("three")],
+        "review_configs": [{"allowed_decisions": ["approve", "reject"]}],
+    }
+    submitted = []
 
     async def ask_with_model(config, session_id, text, **kwargs):
-        return await application.ask(config, session_id, text, model=model, **kwargs)
+        return application.InteractionResult(
+            session_id=session_id, interaction_id="interaction-1", status="interrupted",
+            session_status="running", interrupts=[first_interrupt],
+        )
 
     async def resume_with_model(config, session_id, decisions, **kwargs):
-        return await application.resume(config, session_id, decisions, model=model, **kwargs)
+        submitted.append(decisions)
+        interrupted = len(submitted) == 1
+        return application.InteractionResult(
+            session_id=session_id, interaction_id="interaction-1", status="interrupted" if interrupted else "succeeded",
+            session_status="running", interrupts=[second_interrupt] if interrupted else [],
+            answer=None if interrupted else "done",
+        )
 
     monkeypatch.setattr(cli, "ask", ask_with_model)
     monkeypatch.setattr(cli, "resume", resume_with_model)
-    runner = CliRunner()
-    options = ["--config", str(tmp_path / "config.toml")]
-    pending = runner.invoke(app, ["ask", "remove", *options, "--workdir", str(tmp_path)])
-    assert pending.exit_code == 2, pending.output
-    assert pending.stderr.count("等待审批（2 项）") == 1
-    assert "[工具]" not in pending.stderr
-    session = SessionCatalog.list(config)[0]
-    options += ["--session-id", session.session_id]
-    decisions_file = tmp_path / "decisions.json"
-    decisions_file.write_text(json.dumps({"stale": {"decisions": [{"type": "approve"}]}}))
-    arguments = ["resume", *options, "--decisions-file", str(decisions_file)]
-    invalid = runner.invoke(app, arguments)
-    assert invalid.exit_code == 1
-    assert "审批结果" not in invalid.stderr
-    assert model.call_count == 1
+    session = application.create_session(config, workdir=str(tmp_path))
+    choices = iter(("yes", "no", "no"))
 
-    status = asyncio.run(application.get_pending_approvals(config, session.session_id, model=model))
-    decisions_file.write_text(json.dumps({status.interrupts[0]["id"]: {"decisions": [{"type": "approve"}, {"type": "reject"}]}}))
-    resumed = runner.invoke(app, arguments)
-    assert resumed.exit_code == 2, resumed.output
-    assert resumed.stderr.count("审批结果：批准 1 项，拒绝 1 项") == 1
-    assert resumed.stderr.count("等待审批（1 项）") == 1
-    assert resumed.stderr.index("审批结果") < resumed.stderr.index("[工具]") < resumed.stderr.index("等待审批")
-    assert "失败" not in resumed.stderr
-    assert not (tmp_path / "one").exists()
-    assert (tmp_path / "two").exists()
+    class FakePrompt:
+        async def prompt_async(self, message):
+            return next(choices)
 
-    status = asyncio.run(application.get_pending_approvals(config, session.session_id, model=model))
-    decisions_file.write_text(json.dumps({status.interrupts[0]["id"]: {"decisions": [{"type": "reject"}]}}))
-    finished = runner.invoke(app, arguments)
-    assert finished.exit_code == 0, finished.output
-    assert finished.stderr.count("审批结果：批准 0 项，拒绝 1 项") == 1
-    assert "[工具]" not in finished.stderr
-    assert "等待审批" not in finished.stderr
-    assert (tmp_path / "three").exists()
+    monkeypatch.setattr(cli, "_can_collect_approvals", lambda: True)
+    monkeypatch.setattr(cli, "PromptSession", lambda **kwargs: FakePrompt())
+
+    result = CliRunner().invoke(app, [
+        "ask", "remove", "--config", str(tmp_path / "config.toml"), "--session-id", session.session_id,
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr.count("Waiting for approval (2 items)") == 1
+    assert result.stderr.count("Waiting for approval (1 item)") == 1
+    assert submitted == [
+        {"interrupt-1": {"decisions": [{"type": "approve"}, {"type": "reject"}]}},
+        {"interrupt-2": {"decisions": [{"type": "reject"}]}},
+    ]
 
 
 def test_cli_image_only_and_resume_keep_workdir(config, tmp_path, monkeypatch):
@@ -365,35 +435,6 @@ def test_cli_image_only_and_resume_keep_workdir(config, tmp_path, monkeypatch):
     assert "session_workdir_mismatch" in json.loads(changed_workdir.stdout)["error"]["message"]
 
 
-@pytest.mark.parametrize("document", [
-    "{", '{"id":{},"id":{}}', '{"id":{"decisions":[{"type":"approve","type":"reject"}]}}',
-    'null', '[]', '{"old":{"decisions":[{"type":"edit"}]}}',
-])
-def test_resume_rejects_invalid_json_without_mutating_pending(config, tmp_path, document):
-    from langchain_core.messages import AIMessage
-    from rs_harness import application
-    from tests.models import ScriptedModel
-
-    session = application.create_session(config, workdir=str(tmp_path))
-    model = ScriptedModel([AIMessage(content="", tool_calls=[{
-        "name": "bash", "args": {"command": "rm file.txt"}, "id": "delete", "type": "tool_call",
-    }])])
-    pending = asyncio.run(application.ask(config, session.session_id, "run", model=model))
-    assert pending.status == "interrupted"
-    before = session.trajectory_path.read_bytes()
-    path = tmp_path / "decisions.json"
-    path.write_text(document)
-    result = CliRunner().invoke(app, [
-        "resume", "--config", str(tmp_path / "config.toml"), "--session-id", session.session_id,
-        "--decisions-file", str(path), "--json",
-    ])
-    assert result.exit_code == 1, result.output
-    assert json.loads(result.stdout)["error"]["type"] == "invalid_approval_decisions"
-    assert result.stderr == ""
-    assert session.trajectory_path.read_bytes() == before
-    assert asyncio.run(application.get_pending_approvals(config, session.session_id, model=model)).interrupts == pending.interrupts
-
-
 @pytest.mark.parametrize("already_pending", [False, True])
 def test_pipe_never_consumes_next_line_as_approval(config, tmp_path, monkeypatch, already_pending):
     from langchain_core.messages import AIMessage
@@ -416,8 +457,8 @@ def test_pipe_never_consumes_next_line_as_approval(config, tmp_path, monkeypatch
     assert result.exit_code == 2, result.output
     assert "Action 1:" not in result.output
     assert "rm file.txt" in result.stderr
-    assert result.stderr.count("等待审批（1 项）") == 1
-    assert "审批结果" not in result.stderr
+    assert result.stderr.count("Waiting for approval (1 item)") == 1
+    assert "Decisions:" not in result.stderr
     assert (tmp_path / "file.txt").read_text() == "keep"
     assert model.call_count == 1
     assert SessionCatalog.open(config, session.session_id).meta.status == "running"
@@ -447,29 +488,47 @@ def test_ask_json_reports_pending_gate(config, tmp_path, monkeypatch):
     assert first.stderr == second.stderr == ""
 
 
-def test_resume_json_can_pause_again(config, tmp_path, monkeypatch):
-    from langchain_core.messages import AIMessage
+def test_ask_json_can_collect_approval_and_pause_again(config, tmp_path, monkeypatch):
     from rs_harness import application, cli
-    from tests.models import ScriptedModel
 
-    model = ScriptedModel([
-        AIMessage(content="", tool_calls=[{"name": "bash", "args": {"command": "rm one.txt"}, "id": "one", "type": "tool_call"}]),
-        AIMessage(content="", tool_calls=[{"name": "bash", "args": {"command": "rm two.txt"}, "id": "two", "type": "tool_call"}]),
-    ])
     session = application.create_session(config, workdir=str(tmp_path))
-    first = asyncio.run(application.ask(config, session.session_id, "run", model=model))
+    def interrupt(identifier, filename):
+        return {
+            "id": identifier,
+            "action_requests": [{"name": "bash", "args": {"command": f"rm {filename}"}}],
+            "review_configs": [{"allowed_decisions": ["approve", "reject"]}],
+        }
+
+    prompts = iter(("no", KeyboardInterrupt()))
+
+    class FakePrompt:
+        async def prompt_async(self, message):
+            prompt = next(prompts)
+            if isinstance(prompt, BaseException):
+                raise prompt
+            cli.typer.echo(message, err=True)
+            return prompt
+
+    async def ask_with_model(config, session_id, text, **kwargs):
+        return application.InteractionResult(
+            session_id=session_id, interaction_id="interaction-1", status="interrupted",
+            session_status="running", interrupts=[interrupt("interrupt-1", "one.txt")],
+        )
+
     async def resume_with_model(config, session_id, decisions, **kwargs):
-        return await application.resume(config, session_id, decisions, model=model, **kwargs)
+        return application.InteractionResult(
+            session_id=session_id, interaction_id="interaction-1", status="interrupted",
+            session_status="running", interrupts=[interrupt("interrupt-2", "two.txt")],
+        )
+
     monkeypatch.setattr(cli, "resume", resume_with_model)
-    decisions_file = tmp_path / "decisions.json"
-    decisions_file.write_text(json.dumps({first.interrupts[0]["id"]: {"decisions": [{"type": "reject"}]}}))
+    monkeypatch.setattr(cli, "ask", ask_with_model)
+    monkeypatch.setattr(cli, "_can_collect_approvals", lambda: True)
+    monkeypatch.setattr(cli, "PromptSession", lambda **kwargs: FakePrompt())
     result = CliRunner().invoke(app, [
-        "resume", "--config", str(tmp_path / "config.toml"), "--session-id", session.session_id,
-        "--decisions-file", str(decisions_file), "--json",
+        "ask", "run", "--config", str(tmp_path / "config.toml"), "--session-id", session.session_id, "--json",
     ])
     assert result.exit_code == 2, result.output
-    assert result.stderr == ""
+    assert "Execute? [yes/no]>" in result.stderr
     pending = json.loads(result.stdout)
-    assert pending["interaction_id"] == first.interaction_id
-    assert pending["interrupts"][0]["id"] != first.interrupts[0]["id"]
     assert pending["interrupts"][0]["action_requests"][0]["args"] == {"command": "rm two.txt"}

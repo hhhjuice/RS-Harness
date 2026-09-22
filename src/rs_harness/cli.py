@@ -6,9 +6,11 @@ import asyncio
 import json
 import sys
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Sequence
 
 import typer
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.messages import HumanMessage
 from prompt_toolkit import PromptSession
 from prompt_toolkit.output.color_depth import ColorDepth
 from prompt_toolkit.output.defaults import create_output
@@ -25,7 +27,7 @@ app = typer.Typer(add_completion=False, no_args_is_help=False)
 
 RSH_PROMPT = [("class:rsh-prompt", "rsh> ")]
 RSH_PROMPT_STYLE = Style.from_dict({"rsh-prompt": "ansiblue"})
-APPROVAL_PROMPT = [("class:approval-prompt", "是否执行？[yes/no]> ")]
+APPROVAL_PROMPT = [("class:approval-prompt", "Execute? [yes/no]> ")]
 APPROVAL_PROMPT_STYLE = Style.from_dict({"approval-prompt": "ansiyellow"})
 
 
@@ -42,7 +44,7 @@ def _print_result(result: InteractionResult, as_json: bool, progress: CliProgres
     elif result.interrupts:
         _print_approvals(result)
     elif progress is not None and progress.has_reported_error(result.error):
-        typer.echo("本轮执行失败。", err=True)
+        typer.echo("This run failed.", err=True)
     else:
         typer.echo(f"Error: {payload.get('error')}", err=True)
 
@@ -58,8 +60,8 @@ def _print_action(action: dict) -> None:
             operation = json.dumps(command, ensure_ascii=False, separators=(",", ":"))
     else:
         operation = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
-    typer.echo(f"工具: {name}", err=True)
-    typer.echo(f"操作: {operation}", err=True)
+    typer.echo(f"Tool: {name}", err=True)
+    typer.echo(f"Operation: {operation}", err=True)
 
 
 def _print_approvals(pending: ApprovalStatus | InteractionResult) -> None:
@@ -72,7 +74,8 @@ def _print_approvals(pending: ApprovalStatus | InteractionResult) -> None:
 def _print_approval_header(pending: ApprovalStatus | InteractionResult) -> None:
     count = sum(len(item.get("action_requests", [])) for item in pending.interrupts)
     if count:
-        typer.echo(f"[审批] 等待审批（{count} 项）", err=True)
+        items = "item" if count == 1 else "items"
+        typer.echo(f"[Approval] Waiting for approval ({count} {items})", err=True)
 
 
 def _exit_code(result: InteractionResult) -> int:
@@ -86,13 +89,24 @@ def _print_error(error: Exception, as_json: bool, *, code: str | None = None) ->
         typer.echo(f"Error: {error}", err=True)
 
 
+DEFAULT_CONFIG = Path("config/default.toml")
+
+
+def _root_option(ctx: typer.Context, name: str, value):
+    source = ctx.get_parameter_source(name)
+    if source is not None and source.name == "COMMANDLINE":
+        return value
+    return ctx.obj.get(name, value)
+
+
 @app.callback(invoke_without_command=True)
 def root(
     ctx: typer.Context,
-    config: Annotated[Path, typer.Option("--config", dir_okay=False)] = Path("config/default.toml"),
+    config: Annotated[Path, typer.Option("--config", dir_okay=False)] = DEFAULT_CONFIG,
     session_id: Annotated[str | None, typer.Option("--session-id")] = None,
     workdir: Annotated[Path | None, typer.Option("--workdir", file_okay=False)] = None,
 ) -> None:
+    ctx.obj = {"config": config, "session_id": session_id, "workdir": workdir}
     if ctx.invoked_subcommand is not None:
         return
     asyncio.run(_interactive(config, session_id=session_id, workdir=workdir))
@@ -100,8 +114,9 @@ def root(
 
 @app.command("ask")
 def ask_command(
+    ctx: typer.Context,
     text: Annotated[str, typer.Argument()] = "",
-    config: Annotated[Path, typer.Option("--config", exists=True, dir_okay=False)] = Path("config/default.toml"),
+    config: Annotated[Path, typer.Option("--config", exists=True, dir_okay=False)] = DEFAULT_CONFIG,
     session_id: Annotated[str | None, typer.Option("--session-id")] = None,
     workdir: Annotated[Path | None, typer.Option("--workdir", file_okay=False)] = None,
     as_json: Annotated[bool, typer.Option("--json")] = False,
@@ -110,6 +125,9 @@ def ask_command(
     if not text.strip() and not images:
         raise typer.Exit(code=0)
     try:
+        config = _root_option(ctx, "config", config)
+        session_id = _root_option(ctx, "session_id", session_id)
+        workdir = _root_option(ctx, "workdir", workdir)
         loaded = _load(config)
         session = SessionCatalog.open(loaded, session_id) if session_id else None
         input_workdir = session.meta.workdir if session else (workdir or Path.cwd())
@@ -121,7 +139,7 @@ def ask_command(
             session_id = session.session_id
         progress = None if as_json else CliProgress()
         options = {} if progress is None else {"callbacks": [progress]}
-        result = asyncio.run(ask(loaded, session_id, message, **options))
+        result = asyncio.run(_ask_with_inline_approvals(loaded, session_id, message, **options))
         _print_result(result, as_json, progress)
         if result.status != "succeeded":
             raise typer.Exit(code=_exit_code(result))
@@ -133,66 +151,16 @@ def ask_command(
         raise typer.Exit(code=1) from exc
 
 
-@app.command("approvals")
-def approvals_command(
-    session_id: Annotated[str, typer.Option("--session-id")],
-    config: Annotated[Path, typer.Option("--config", exists=True, dir_okay=False)] = Path("config/default.toml"),
-    as_json: Annotated[bool, typer.Option("--json")] = False,
-) -> None:
-    try:
-        loaded = _load(config)
-        pending = asyncio.run(get_pending_approvals(loaded, session_id))
-    except Exception as exc:
-        _print_error(exc, as_json)
-        raise typer.Exit(code=1) from exc
-    if as_json:
-        typer.echo(pending.model_dump_json(indent=2))
-    else:
-        _print_approvals(pending)
-
-
-def _unique_object(pairs: list[tuple]) -> dict:
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"Duplicate JSON key: {key}")
-        result[key] = value
-    return result
-
-
-@app.command("resume")
-def resume_command(
-    session_id: Annotated[str, typer.Option("--session-id")],
-    decisions_file: Annotated[Path, typer.Option("--decisions-file", dir_okay=False)],
-    config: Annotated[Path, typer.Option("--config", exists=True, dir_okay=False)] = Path("config/default.toml"),
-    as_json: Annotated[bool, typer.Option("--json")] = False,
-) -> None:
-    try:
-        decisions = json.loads(decisions_file.read_text(encoding="utf-8"), object_pairs_hook=_unique_object)
-    except (OSError, ValueError) as exc:
-        _print_error(exc, as_json, code="invalid_approval_decisions")
-        raise typer.Exit(code=1) from exc
-    try:
-        loaded = _load(config)
-        session = SessionCatalog.open(loaded, session_id)
-        progress = None if as_json else CliProgress()
-        options = {} if progress is None else {"callbacks": [progress]}
-        result = asyncio.run(resume(loaded, session_id, decisions, **options))
-    except (ConfigError, SessionError) as exc:
-        _print_error(exc, as_json)
-        raise typer.Exit(code=1) from exc
-    _print_result(result, as_json, progress)
-    if result.status != "succeeded":
-        raise typer.Exit(code=_exit_code(result))
-
-
 @app.command("create-session")
 def create_session_command(
-    config: Annotated[Path, typer.Option("--config", exists=True, dir_okay=False)] = Path("config/default.toml"),
+    ctx: typer.Context,
+    config: Annotated[Path, typer.Option("--config", exists=True, dir_okay=False)] = DEFAULT_CONFIG,
     workdir: Annotated[Path | None, typer.Option("--workdir", file_okay=False)] = None,
     as_json: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     try:
+        config = _root_option(ctx, "config", config)
+        workdir = _root_option(ctx, "workdir", workdir)
         session = create_session(_load(config), workdir=str(workdir) if workdir else None)
     except (ConfigError, SessionError) as exc:
         typer.echo(f"Error: {exc}", err=True)
@@ -203,10 +171,12 @@ def create_session_command(
 
 @app.command("list-session")
 def list_session_command(
-    config: Annotated[Path, typer.Option("--config", exists=True, dir_okay=False)] = Path("config/default.toml"),
+    ctx: typer.Context,
+    config: Annotated[Path, typer.Option("--config", exists=True, dir_okay=False)] = DEFAULT_CONFIG,
     as_json: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     try:
+        config = _root_option(ctx, "config", config)
         sessions = SessionCatalog.list(_load(config))
     except ConfigError as exc:
         typer.echo(f"Error: {exc}", err=True)
@@ -220,11 +190,16 @@ def list_session_command(
 
 @app.command("close-session")
 def close_session_command(
-    session_id: Annotated[str, typer.Option("--session-id")],
-    config: Annotated[Path, typer.Option("--config", exists=True, dir_okay=False)] = Path("config/default.toml"),
+    ctx: typer.Context,
+    session_id: Annotated[str | None, typer.Option("--session-id")] = None,
+    config: Annotated[Path, typer.Option("--config", exists=True, dir_okay=False)] = DEFAULT_CONFIG,
     as_json: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     try:
+        session_id = _root_option(ctx, "session_id", session_id)
+        if session_id is None:
+            raise typer.BadParameter("Missing option '--session-id'.")
+        config = _root_option(ctx, "config", config)
         session = SessionCatalog.close(_load(config), session_id)
     except (ConfigError, SessionError, SessionBusy) as exc:
         typer.echo(f"Error: {exc}", err=True)
@@ -313,7 +288,7 @@ async def _interactive(config_path: Path, *, session_id: str | None, workdir: Pa
             progress = CliProgress()
             result = await ask(config, session.session_id, text, callbacks=[progress])
             if result.interrupts:
-                pending = ApprovalStatus(**{key: getattr(result, key) for key in ApprovalStatus.model_fields})
+                pending = _approval_status_from_result(result)
             else:
                 _print_result(result, False, progress)
                 progress = None
@@ -323,6 +298,30 @@ async def _interactive(config_path: Path, *, session_id: str | None, workdir: Pa
 
     if session is not None and session.meta.status == "running":
         typer.echo(f"Use rsh --session-id {session.session_id} to resume this session.", err=True)
+
+
+def _approval_status_from_result(result: InteractionResult) -> ApprovalStatus:
+    return ApprovalStatus(**{key: getattr(result, key) for key in ApprovalStatus.model_fields})
+
+
+def _can_collect_approvals() -> bool:
+    return sys.stdin.isatty() and sys.stderr.isatty()
+
+
+async def _ask_with_inline_approvals(
+    config: Config,
+    session_id: str,
+    message: HumanMessage,
+    *,
+    callbacks: Sequence[BaseCallbackHandler] = (),
+) -> InteractionResult:
+    result = await ask(config, session_id, message, callbacks=callbacks)
+    while result.interrupts and _can_collect_approvals():
+        decisions = await _collect_approvals(_approval_status_from_result(result))
+        if decisions is None:
+            break
+        result = await resume(config, session_id, decisions, callbacks=callbacks)
+    return result
 
 
 async def _collect_approvals(pending: ApprovalStatus) -> dict | None:
@@ -347,7 +346,7 @@ async def _collect_approvals(pending: ApprovalStatus) -> dict | None:
                     if choice in {"n", "no"}:
                         decisions.append({"type": "reject"})
                         break
-                    typer.echo("请输入 y/yes 或 n/no。", err=True)
+                    typer.echo("Enter y/yes or n/no.", err=True)
             decisions_by_interrupt[item["id"]] = {"decisions": decisions}
     except (EOFError, KeyboardInterrupt):
         return None

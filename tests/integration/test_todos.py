@@ -60,12 +60,9 @@ from rs_harness import application, cli
 from tests.models import ScriptedModel
 
 model = ScriptedModel([AIMessage.model_validate(item) for item in json.loads(sys.argv.pop(1))])
-async def ask(config, session_id, text):
-    return await application.ask(config, session_id, text, model=model)
-async def resume(config, session_id, decisions):
-    return await application.resume(config, session_id, decisions, model=model)
+async def ask(config, session_id, text, **kwargs):
+    return await application.ask(config, session_id, text, model=model, **kwargs)
 cli.ask = ask
-cli.resume = resume
 cli.main()
 '''
     process = subprocess.run(
@@ -377,28 +374,3 @@ async def test_cli_todos_survive_independent_processes(config, tmp_path):
     assert state.values["todos"] == todos
     assert [message.content for message in state.values["messages"] if isinstance(message, HumanMessage)] == ["Plan", "Continue"]
     assert Counter(message.tool_call_id for message in state.values["messages"] if isinstance(message, ToolMessage)) == Counter(["seed", "plan"])
-
-
-@pytest.mark.parametrize("decision", ["approve", "reject"])
-async def test_cli_todo_and_approval_resume_in_another_process(config, tmp_path, planned_session, decision):
-    target = tmp_path / "target.txt"
-    target.write_text("keep until approved")
-    todos = [{"content": "Review cleanup", "status": "in_progress"}]
-    pending = run_cli(tmp_path / "config.toml", planned_session.session_id, [
-        AIMessage(content="", tool_calls=[
-            call("write_todos", {"todos": todos}, "plan"),
-            call("bash", {"command": "rm target.txt"}, "cleanup"),
-        ]),
-    ], "ask", "Clean", expected_code=2)
-    assert target.exists()
-    assert (await snapshot(config, planned_session)).values["todos"] == INITIAL_TODOS
-    decisions_file = tmp_path / "decisions.json"
-    decisions_file.write_text(json.dumps({pending["interrupts"][0]["id"]: {"decisions": [{"type": decision}]}}))
-    result = run_cli(tmp_path / "config.toml", planned_session.session_id, [AIMessage(content="Reviewed")],
-                     "resume", "--decisions-file", str(decisions_file))
-    assert result["status"] == "succeeded"
-    assert result["interaction_id"] == pending["interaction_id"]
-    assert target.exists() == (decision == "reject")
-    state = await snapshot(config, planned_session)
-    assert state.values["todos"] == todos
-    assert [message.content for message in state.values["messages"] if isinstance(message, HumanMessage)] == ["Make a plan", "Clean"]

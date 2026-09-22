@@ -79,12 +79,16 @@ def _arguments(inputs: Any) -> str:
         if _SECRET.search(key):
             summary[key] = "[redacted]"
         elif key in {"content", "old_text", "new_text"} and isinstance(value, str):
-            summary[key] = f"<{len(value)} 字符>"
+            summary[key] = f"<{len(value)} chars>"
         elif key in {"path", "pattern", "command", "offset", "limit"}:
             if key == "command" and isinstance(value, str):
                 value = _redact_command(value)
             summary[key] = value
     return _preview(summary) if summary else ""
+
+
+def _count(value: int, noun: str) -> str:
+    return f"{value} {noun}" if value == 1 else f"{value} {noun}s"
 
 
 class CliProgress(AsyncCallbackHandler):
@@ -115,7 +119,7 @@ class CliProgress(AsyncCallbackHandler):
 
     async def on_chat_model_start(self, serialized, messages, **kwargs: Any) -> None:
         self._model_count += 1
-        self._write(f"[模型] 第 {self._model_count} 次调用")
+        self._write(f"[Model] Call {self._model_count}")
 
     async def on_chain_start(self, serialized, inputs, *, run_id: UUID, **kwargs: Any) -> None:
         name = kwargs.get("name") or (serialized or {}).get("name", "")
@@ -131,30 +135,34 @@ class CliProgress(AsyncCallbackHandler):
         if not name or not isinstance(outputs, dict):
             return
         if name == "StopHookMiddleware.after_agent" and outputs.get("jump_to") == "model":
-            self._write(f"[中间件] {_preview(name)} · 继续调用模型")
+            self._write(f"[Middleware] {_preview(name)} · continuing model execution")
         elif name == "HumanInTheLoopMiddleware.after_model" and outputs.get("messages") and self._approval_counts is not None:
             approved, rejected = self._approval_counts
             self._approval_counts = None
-            self._write(f"[审批] 审批结果：批准 {approved} 项，拒绝 {rejected} 项")
+            self._write(f"[Approval] Decisions: {approved} approved, {rejected} rejected")
         elif name == "TodoListMiddleware.after_model":
             rejected = [message for message in outputs.get("messages", []) if isinstance(message, ToolMessage) and message.status == "error"]
             if rejected:
-                self._write(f"[计划] 更新被拒绝：同一响应只能更新一次（{len(rejected)} 次调用），计划未改变", plan=True)
+                self._write(
+                    f"[Todo] Update rejected: only one update is allowed per response "
+                    f"({len(rejected)} calls); plan unchanged",
+                    plan=True,
+                )
 
     async def on_chain_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
         name = self._middleware.pop(run_id, None)
         if name and not isinstance(error, (GraphBubbleUp, CancelledError)):
-            detail = "模型调用预算已耗尽，停止继续调用" if type(error).__name__ == "ModelCallLimitExceededError" else None
-            self._report_error(f"[中间件] {_preview(name)} · 失败", type(error).__name__, str(error), detail=detail)
+            detail = "Model call budget exhausted; stopping further calls" if type(error).__name__ == "ModelCallLimitExceededError" else None
+            self._report_error(f"[Middleware] {_preview(name)} · failed", type(error).__name__, str(error), detail=detail)
 
     async def on_custom_event(self, name: str, data: Any, **kwargs: Any) -> None:
         if name != "rsh.middleware" or not isinstance(data, dict):
             return
-        label = f"[中间件] {_preview(data.get('name', 'unknown'))}"
+        label = f"[Middleware] {_preview(data.get('name', 'unknown'))}"
         if data.get("status") == "blocked":
-            self._write(f"{label} · 已拦截 {_preview(data.get('detail', ''))}")
+            self._write(f"{label} · blocked {_preview(data.get('detail', ''))}")
         elif data.get("status") == "error":
-            self._report_error(f"{label} · 检查失败", data["error_type"], data["detail"])
+            self._report_error(f"{label} · check failed", data["error_type"], data["detail"])
 
     async def on_tool_start(
         self, serialized, input_str, *, run_id: UUID,
@@ -163,34 +171,31 @@ class CliProgress(AsyncCallbackHandler):
         name = str((serialized or {}).get("name") or "unknown")
         summary = _arguments(inputs)
         self._tools[run_id] = (name, monotonic(), summary)
-        if name != "write_todos":
-            self._write(f"[工具] {_preview(name)} · 开始 {summary}".rstrip())
 
     async def on_tool_end(self, output: Any, *, run_id: UUID, **kwargs: Any) -> None:
         run = self._tools.pop(run_id, None)
         if run is None:
             return
         name, started, summary = run
+        elapsed = monotonic() - started
         if getattr(output, "status", None) == "error":
-            prefix = "[计划] 更新失败" if name == "write_todos" else f"[工具] {_preview(name)} · 失败 ({monotonic() - started:.2f}s) {summary}".rstrip()
+            prefix = "[Todo] Update failed" if name == "write_todos" else f"[Tool] Failed {_preview(name)} ({elapsed:.2f}s) {summary}".rstrip()
             self._report_error(prefix, "ToolError", str(output.content), plan=name == "write_todos")
             return
         if name != "write_todos":
-            self._write(f"[工具] {_preview(name)} · 完成 ({monotonic() - started:.2f}s) {summary}".rstrip())
+            self._write(f"[Tool] Running {_preview(name)} ({elapsed:.2f}s) {summary}".rstrip())
         update = getattr(output, "update", None)
         if name == "write_todos" and isinstance(update, dict) and isinstance(update.get("todos"), list):
             todos = update["todos"]
-            self._write(f"[计划] 已更新 {len(todos)} 项" if todos else "[计划] 计划已清空", plan=True)
-            for todo in todos[:3]:
+            self._write(f"[Todo] Updated {_count(len(todos), 'item')}" if todos else "[Todo] Plan cleared", plan=True)
+            for todo in todos:
                 self._write(f"  {_preview(todo.get('status', 'pending'), 24)}: {_preview(todo.get('content', ''), 100)}", plan=True)
-            if len(todos) > 3:
-                self._write(f"  … 其余 {len(todos) - 3} 项", plan=True)
 
     async def on_tool_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
         run = self._tools.pop(run_id, None)
         if run is not None and not isinstance(error, (GraphBubbleUp, CancelledError)):
             name, started, summary = run
-            prefix = "[计划] 更新失败" if name == "write_todos" else f"[工具] {_preview(name)} · 失败 ({monotonic() - started:.2f}s) {summary}".rstrip()
+            prefix = "[Todo] Update failed" if name == "write_todos" else f"[Tool] Failed {_preview(name)} ({monotonic() - started:.2f}s) {summary}".rstrip()
             detail = None
             if isinstance(error, ValidationError):
                 issue = error.errors(include_input=False, include_url=False)[0]

@@ -1,7 +1,5 @@
 import asyncio
 import json
-import subprocess
-import sys
 
 import pytest
 from langchain.agents import create_agent
@@ -315,45 +313,6 @@ async def test_multiple_real_interrupt_ids_route_in_reverse_mapping_order(config
     assert result.status == "succeeded", result.error
     assert result.answer == "approve/reject"
     assert result.interaction_id == pending.interaction_id
-
-
-async def test_cli_checkpoint_survives_separate_processes(config, tmp_path):
-    session = create_session(config, workdir=str(tmp_path))
-    (tmp_path / "target.txt").write_text("delete once")
-    script = '''
-import sys
-from langchain_core.messages import AIMessage
-from rs_harness import cli, application
-from tests.models import ScriptedModel
-
-mode = sys.argv[1]
-del sys.argv[1]
-model = ScriptedModel([AIMessage(content="", tool_calls=[{"name":"bash", "args":{"command":"rm target.txt"}, "id":"remove", "type":"tool_call"}])]) if mode == "ask" else ScriptedModel([AIMessage(content="done")])
-async def ask(config, session_id, text):
-    return await application.ask(config, session_id, text, model=model)
-async def resume(config, session_id, decisions):
-    return await application.resume(config, session_id, decisions, model=model)
-cli.ask = ask
-cli.resume = resume
-cli.main()
-'''
-    options = ["--config", str(tmp_path / "config.toml"), "--session-id", session.session_id, "--json"]
-    def run_process(mode, arguments, code):
-        process = subprocess.run([sys.executable, "-c", script, mode, *arguments, *options], capture_output=True, text=True, timeout=20)
-        assert process.returncode == code, process.stderr
-        assert process.stderr == ""
-        return json.loads(process.stdout)
-    first = run_process("ask", ["ask", "remove"], 2)
-    queried = run_process("query", ["approvals"], 0)
-    assert queried["interrupts"] == first["interrupts"]
-    decisions_file = tmp_path / "decisions.json"
-    decisions_file.write_text(json.dumps({queried["interrupts"][0]["id"]: {"decisions": [{"type": "approve"}]}}))
-    result = run_process("resume", ["resume", "--decisions-file", str(decisions_file)], 0)
-    assert result["interaction_id"] == first["interaction_id"]
-    assert not (tmp_path / "target.txt").exists()
-    state = await snapshot(config, session)
-    assert sum(isinstance(message, HumanMessage) for message in state.values["messages"]) == 1
-    assert run_process("repeat", ["resume", "--decisions-file", str(decisions_file)], 1)["error"]["type"] == "no_pending_approval"
 
 
 async def test_all_hard_denials_run_without_an_approval_interrupt(config, tmp_path, monkeypatch):
