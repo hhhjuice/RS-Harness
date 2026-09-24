@@ -227,7 +227,7 @@ def test_terminal_partial_approval_is_discarded(terminal_cli, config, tmp_path, 
 @pytest.mark.parametrize("terminal_cli", [PERMISSION_SCRIPT], indirect=True)
 def test_terminal_treats_slash_commands_as_invalid_approval_input(terminal_cli, config, tmp_path):
     master, read_until = begin_review(terminal_cli, tmp_path)
-    for command in (b"/status\r", b"/close\r", b"/quit\r"):
+    for command in (b"/status\r", b"/reasoning high\r", b"/close\r", b"/quit\r"):
         os.write(master, command)
         read_until("Enter y/yes or n/no.".encode())
         read_until("Execute? [yes/no]>".encode())
@@ -239,6 +239,7 @@ def test_terminal_treats_slash_commands_as_invalid_approval_input(terminal_cli, 
     assert SessionCatalog.list(config)[0].meta.status == "running"
     assert (tmp_path / "first.txt").read_text() == "keep"
     assert (tmp_path / "second.txt").read_text() == "keep"
+    assert "reasoning_effort" not in (tmp_path / "config.toml").read_text(encoding="utf-8")
     os.write(master, b"/quit\r")
     assert terminal_cli[1].wait(timeout=5) == 0
 

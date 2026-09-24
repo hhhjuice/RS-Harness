@@ -29,6 +29,8 @@ def build_agent(
         }
         if config.model.base_url:
             kwargs["base_url"] = config.model.base_url
+        if config.model.reasoning_effort is not None:
+            kwargs["reasoning_effort"] = config.model.reasoning_effort
         model = ChatOpenAI(**kwargs)
 
     from langchain.agents import create_agent

@@ -15,6 +15,7 @@ dependencies = [
     "langgraph-checkpoint-sqlite>=2.0,<4",
     "pydantic>=2.7,<3",
     "prompt-toolkit>=3.0.52,<4",
+    "tomlkit>=0.13,<1",
     "typer>=0.12,<1",
 ]
 

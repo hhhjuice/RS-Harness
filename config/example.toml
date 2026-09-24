@@ -4,6 +4,7 @@ base_url = ""
 api_key = ""
 timeout_s = 60
 max_tokens = 4096
+# reasoning_effort = "high" # none|minimal|low|medium|high|xhigh|max
 
 [runtime]
 sessions_dir = "../sessions"

@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from rs_harness.config import Config, ConfigError
+from rs_harness.config import Config, ConfigError, ModelConfig, REASONING_EFFORTS, save_reasoning_effort
 
 
 def test_config_resolves_paths_and_prompt(config):
@@ -13,6 +13,61 @@ def test_config_resolves_paths_and_prompt(config):
     assert config.summary()["max_model_calls"] == 10
     assert config.summary()["bash_timeout_s"] == 60
     assert config.summary()["max_tool_output_bytes"] == 65536
+    assert config.model.reasoning_effort is None
+    assert config.summary()["reasoning_effort"] is None
+
+
+@pytest.mark.parametrize("effort", REASONING_EFFORTS)
+def test_reasoning_effort_accepts_openai_values(effort):
+    model = ModelConfig.model_validate({"model": "test-model", "reasoning_effort": effort})
+    assert model.reasoning_effort == effort
+
+
+@pytest.mark.parametrize("effort", ["", "LOW", "auto", "off", 3, True])
+def test_reasoning_effort_rejects_other_values(effort):
+    with pytest.raises(ValueError):
+        ModelConfig.model_validate({"model": "test-model", "reasoning_effort": effort})
+
+
+def test_reasoning_effort_write_preserves_file_and_can_reset(config, tmp_path):
+    path = tmp_path / "config.toml"
+    original = path.read_text(encoding="utf-8").replace(
+        "[model]\n", "# Existing configuration\n[model]\n# Model comment\n"
+    )
+    path.write_text(original, encoding="utf-8")
+    path.chmod(0o640)
+
+    save_reasoning_effort(path, "high")
+    assert Config.load(path).model.reasoning_effort == "high"
+    assert path.stat().st_mode & 0o777 == 0o640
+    assert "# Existing configuration" in path.read_text(encoding="utf-8")
+    assert "# Model comment" in path.read_text(encoding="utf-8")
+    assert 'api_key = "test-key"' in path.read_text(encoding="utf-8")
+
+    save_reasoning_effort(path, "low")
+    assert Config.load(path).model.reasoning_effort == "low"
+    assert path.read_text(encoding="utf-8").count("reasoning_effort =") == 1
+
+    save_reasoning_effort(path, None)
+    assert Config.load(path).model.reasoning_effort is None
+    assert path.read_text(encoding="utf-8") == original
+    assert path.stat().st_mode & 0o777 == 0o640
+
+
+def test_reasoning_effort_save_failure_keeps_original(config, tmp_path, monkeypatch):
+    from rs_harness import config as config_module
+
+    path = tmp_path / "config.toml"
+    original = path.read_bytes()
+
+    def fail_replace(*args):
+        raise OSError("replacement refused")
+
+    monkeypatch.setattr(config_module.os, "replace", fail_replace)
+    with pytest.raises(ConfigError, match="Unable to save model.reasoning_effort"):
+        save_reasoning_effort(path, "high")
+    assert path.read_bytes() == original
+    assert list(tmp_path.glob(".config.toml.*.tmp")) == []
 
 
 @pytest.mark.parametrize("field,value", [

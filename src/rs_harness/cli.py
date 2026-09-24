@@ -18,7 +18,7 @@ from prompt_toolkit.styles import Style
 
 from . import __version__
 from .application import ApprovalStatus, InteractionResult, ask, create_session, get_pending_approvals, resume
-from .config import Config, ConfigError
+from .config import REASONING_EFFORTS, Config, ConfigError, save_reasoning_effort
 from .inputs import InputError, build_human_message
 from .progress import CliProgress
 from .sessions.catalog import SessionBusy, SessionCatalog, SessionError
@@ -29,6 +29,7 @@ RSH_PROMPT = [("class:rsh-prompt", "rsh> ")]
 RSH_PROMPT_STYLE = Style.from_dict({"rsh-prompt": "ansiblue"})
 APPROVAL_PROMPT = [("class:approval-prompt", "Execute? [yes/no]> ")]
 APPROVAL_PROMPT_STYLE = Style.from_dict({"approval-prompt": "ansiyellow"})
+REASONING_USAGE = "/reasoning [none|minimal|low|medium|high|xhigh|max|default]"
 
 
 def _load(path: Path) -> Config:
@@ -210,6 +211,7 @@ def close_session_command(
 
 async def _interactive(config_path: Path, *, session_id: str | None, workdir: Path | None) -> None:
     try:
+        config_path = config_path.expanduser().resolve()
         config = _load(config_path)
         session = SessionCatalog.open(config, session_id) if session_id else None
     except (ConfigError, SessionError) as exc:
@@ -261,7 +263,31 @@ async def _interactive(config_path: Path, *, session_id: str | None, workdir: Pa
         if command in {"/quit", "/exit"}:
             break
         if command == "/help":
-            typer.echo("/status  show session status\n/close   close session\n/quit    leave session running\n/exit    leave session running")
+            typer.echo(
+                "/status     show session status\n"
+                "/reasoning  show or set reasoning effort\n"
+                f"            {REASONING_USAGE}\n"
+                "/close      close session\n"
+                "/quit       leave session running\n"
+                "/exit       leave session running"
+            )
+            continue
+        if command.split(maxsplit=1)[0] == "/reasoning":
+            parts = command.split()
+            if len(parts) == 1:
+                typer.echo(f"Reasoning effort: {config.model.reasoning_effort or 'default'}\n{REASONING_USAGE}")
+                continue
+            if len(parts) != 2 or parts[1] not in (*REASONING_EFFORTS, "default"):
+                typer.echo(f"Usage: {REASONING_USAGE}", err=True)
+                continue
+            effort = None if parts[1] == "default" else parts[1]
+            try:
+                save_reasoning_effort(config_path, effort)
+            except ConfigError as exc:
+                typer.echo(f"Error: {exc}", err=True)
+                continue
+            config = config.model_copy(update={"model": config.model.model_copy(update={"reasoning_effort": effort})})
+            typer.echo(f"Reasoning effort: {effort or 'default'}")
             continue
         if command == "/status":
             if session is None:

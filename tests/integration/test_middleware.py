@@ -376,6 +376,46 @@ def test_production_agent_factory_wires_middleware_and_context(config, monkeypat
     assert captured["middleware"][-1].hooks == ()
 
 
+@pytest.mark.parametrize("effort", [None, "none", "high", "max"])
+def test_production_agent_passes_configured_reasoning_effort(config, monkeypatch, effort):
+    captured: dict[str, Any] = {}
+
+    def fake_chat_openai(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("langchain_openai.ChatOpenAI", fake_chat_openai)
+    monkeypatch.setattr("langchain.agents.create_agent", lambda **kwargs: kwargs)
+    configured = config.model_copy(update={
+        "model": config.model.model_copy(update={"reasoning_effort": effort}),
+    })
+
+    build_agent(configured, workdir="/workspace")
+
+    assert captured.get("reasoning_effort") == effort
+    assert ("reasoning_effort" in captured) == (effort is not None)
+    assert "reasoning" not in captured
+
+
+@pytest.mark.parametrize("effort", [None, "none", "max"])
+def test_chat_openai_serializes_reasoning_effort_without_changing_api(effort):
+    from langchain_openai import ChatOpenAI
+
+    kwargs: dict[str, Any] = {
+        "model": "test-model", "api_key": "offline-key",
+        "base_url": "https://example.invalid/v1",
+    }
+    if effort is not None:
+        kwargs["reasoning_effort"] = effort
+    model = ChatOpenAI(**kwargs)
+
+    payload = model._get_request_payload([HumanMessage(content="offline payload check")])
+
+    assert payload.get("reasoning_effort") == effort
+    assert ("reasoning_effort" in payload) == (effort is not None)
+    assert model._use_responses_api(payload) is False
+
+
 class ApplicationContextCapture(AgentMiddleware[AgentState, AgentContext]):
     def __init__(self):
         super().__init__()

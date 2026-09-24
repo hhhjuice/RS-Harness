@@ -7,6 +7,7 @@ import pytest
 from typer.testing import CliRunner
 
 from rs_harness.cli import app
+from rs_harness.config import Config, ConfigError
 from rs_harness.sessions.catalog import SessionCatalog
 from tests.images import write_test_image
 
@@ -46,6 +47,99 @@ def test_empty_or_exit_pipe_input_leaves_no_session(config, tmp_path, text):
     assert result.exit_code == 0, result.output
     assert "\x1b" not in result.output
     assert "Warning:" not in result.output
+    assert SessionCatalog.list(config) == []
+
+
+def test_help_shows_reasoning_options(tmp_path, config):
+    result = CliRunner().invoke(
+        app, ["--config", str(tmp_path / "config.toml")], input="/help\n/quit\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "/reasoning [none|minimal|low|medium|high|xhigh|max|default]" in result.output
+
+
+def test_reasoning_command_persists_and_resets_without_a_session(config, tmp_path):
+    path = tmp_path / "config.toml"
+    runner = CliRunner()
+
+    set_result = runner.invoke(app, ["--config", str(path)], input="/help\n/reasoning\n/reasoning high\n/quit\n")
+    assert set_result.exit_code == 0, set_result.output
+    assert "/reasoning  show or set reasoning effort" in set_result.output
+    assert "Reasoning effort: default" in set_result.output
+    assert "Reasoning effort: high" in set_result.output
+    assert Config.load(path).model.reasoning_effort == "high"
+    assert SessionCatalog.list(config) == []
+
+    reset_result = runner.invoke(app, ["--config", str(path)], input="/reasoning\n/reasoning default\n/quit\n")
+    assert reset_result.exit_code == 0, reset_result.output
+    assert "Reasoning effort: high" in reset_result.output
+    assert Config.load(path).model.reasoning_effort is None
+    assert "reasoning_effort" not in path.read_text(encoding="utf-8")
+
+
+def test_reasoning_command_uses_relative_config_path(config, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(app, ["--config", "config.toml"], input="/reasoning high\n/quit\n")
+
+    assert result.exit_code == 0, result.output
+    assert Config.load(tmp_path / "config.toml").model.reasoning_effort == "high"
+
+
+@pytest.mark.parametrize("invalid", ["LOW", "auto", "high extra", "default extra"])
+def test_reasoning_command_rejects_invalid_values(config, tmp_path, invalid):
+    path = tmp_path / "config.toml"
+    before = path.read_bytes()
+
+    result = CliRunner().invoke(app, ["--config", str(path)], input=f"/reasoning {invalid}\n/quit\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Usage: /reasoning" in result.output
+    assert path.read_bytes() == before
+    assert SessionCatalog.list(config) == []
+
+
+def test_reasoning_command_applies_to_next_question(config, tmp_path, monkeypatch):
+    from rs_harness import application, cli
+
+    seen = []
+
+    async def ask_with_capture(current_config, session_id, text, **kwargs):
+        seen.append(current_config.model.reasoning_effort)
+        return application.InteractionResult(
+            session_id=session_id, interaction_id="test-interaction",
+            status="succeeded", session_status="running", answer="done",
+        )
+
+    monkeypatch.setattr(cli, "ask", ask_with_capture)
+    path = tmp_path / "config.toml"
+    result = CliRunner().invoke(
+        app, ["--config", str(path)],
+        input="/reasoning high\nfirst question\n/reasoning none\nsecond question\n/quit\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert seen == ["high", "none"]
+    assert Config.load(path).model.reasoning_effort == "none"
+
+
+def test_reasoning_save_failure_keeps_current_setting(config, tmp_path, monkeypatch):
+    from rs_harness import cli
+
+    path = tmp_path / "config.toml"
+    before = path.read_bytes()
+
+    def fail_save(*args):
+        raise ConfigError("Unable to save model.reasoning_effort")
+
+    monkeypatch.setattr(cli, "save_reasoning_effort", fail_save)
+    result = CliRunner().invoke(app, ["--config", str(path)], input="/reasoning high\n/reasoning\n/quit\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Error: Unable to save model.reasoning_effort" in result.output
+    assert "Reasoning effort: default" in result.output
+    assert path.read_bytes() == before
     assert SessionCatalog.list(config) == []
 
 

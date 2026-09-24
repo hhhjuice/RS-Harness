@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import os
+import stat
+import tempfile
 import tomllib
 from pathlib import Path
-from typing import Self
+from typing import Literal, Self, get_args
 
+import tomlkit
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 
@@ -18,6 +22,10 @@ class ConfigError(ValueError):
         super().__init__(message)
 
 
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+REASONING_EFFORTS = get_args(ReasoningEffort)
+
+
 class ModelConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
@@ -26,6 +34,7 @@ class ModelConfig(BaseModel):
     api_key: SecretStr = Field(default=SecretStr(""), exclude=True, repr=False)
     timeout_s: float = Field(default=60, gt=0)
     max_tokens: int = Field(default=4096, gt=0)
+    reasoning_effort: ReasoningEffort | None = None
 
     @field_validator("model")
     @classmethod
@@ -123,6 +132,7 @@ class Config(BaseModel):
             "base_url": self.model.base_url,
             "timeout_s": self.model.timeout_s,
             "max_tokens": self.model.max_tokens,
+            "reasoning_effort": self.model.reasoning_effort,
             "sessions_dir": str(self.runtime.sessions_dir),
             "checkpoint_file": str(self.runtime.checkpoint_file),
             "system_prompt_file": str(self.runtime.system_prompt_file),
@@ -130,6 +140,35 @@ class Config(BaseModel):
             "bash_timeout_s": self.runtime.bash_timeout_s,
             "max_tool_output_bytes": self.runtime.max_tool_output_bytes,
         }
+
+
+def save_reasoning_effort(path: Path, effort: ReasoningEffort | None) -> None:
+    config_path = path.expanduser().resolve()
+    temporary: Path | None = None
+    try:
+        document = tomlkit.parse(config_path.read_text(encoding="utf-8"))
+        model = document["model"]
+        if effort is None:
+            model.pop("reasoning_effort", None)
+        else:
+            model["reasoning_effort"] = effort
+
+        updated = tomlkit.dumps(document)
+        tomllib.loads(updated)
+        mode = stat.S_IMODE(config_path.stat().st_mode)
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", newline="", dir=config_path.parent,
+            prefix=f".{config_path.name}.", suffix=".tmp", delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(updated)
+        temporary.chmod(mode)
+        os.replace(temporary, config_path)
+    except Exception as exc:
+        raise ConfigError("Unable to save model.reasoning_effort") from exc
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _resolve_path(base_dir: Path, value: str) -> str:

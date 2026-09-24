@@ -9,6 +9,8 @@ cp config/example.toml config/default.toml
 
 在 `config/default.toml` 的 `[model]` 中填写 `model`、`base_url` 和 `api_key`；复制示例仅用于首次配置，已有本地配置无需覆盖。
 
+可选的 `reasoning_effort` 控制模型的推理强度，取值为 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`。不配置时不向提供商发送此参数，由模型使用自身默认值；`none` 是明确请求关闭推理。交互模式中用 `/reasoning` 查看当前设置和用法，`/reasoning high` 等命令修改强度，`/reasoning default` 则删除该配置项。修改会写入当前 `--config` 指定的 TOML 文件，从下一轮模型调用生效；后续使用同一文件启动的会话也会采用新值。具体支持的档位由所选模型及兼容服务决定，不支持的值会按提供商错误返回。
+
 `[runtime].max_model_calls` 默认为 `10`，限制一次 `ainvoke` 执行段中的模型调用次数。达到预算后，下一次模型调用返回 `ModelCallLimitExceededError`；新的普通交互或审批恢复重新获得预算，不跨恢复累计。工作目录通过每次调用的 runtime context 注入 middleware 和工具，context 对象不作为消息历史保存；系统提示词保留现有工作目录说明。
 
 Agent 已接入 Stop Hook 协议，默认检查列表为空，不预设任务验收规则。在 `src/rs_harness/agents/middleware.py` 的 `build_middleware` 中，将末尾的 `StopHookMiddleware()` 改为 `StopHookMiddleware(hooks=(first_check, second_check))`，并定义或导入对应检查函数，即可集中注册；CLI、普通提问和审批恢复使用同一套注册。
