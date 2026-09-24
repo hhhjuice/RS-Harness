@@ -109,3 +109,29 @@ def test_real_model_image_session_across_processes(live_config_path, tmp_path):
         session_id=first["session_id"],
     )
     assert_colors(second["answer"])
+
+
+def test_real_model_read_image_and_recovery(live_config_path, tmp_path):
+    image = tmp_path / "sample.png"
+    write_test_image(image)
+    format_instruction = (
+        'Reply only with a JSON object whose keys are "left" and "right" and whose values '
+        'are the English color names of the left and right halves. No Markdown.'
+    )
+    first = ask_in_process(
+        live_config_path, tmp_path,
+        "Use read_image to inspect sample.png. " + format_instruction,
+    )
+    assert json.loads(first["answer"]) == {"left": "red", "right": "blue"}
+    image.unlink()
+    second = ask_in_process(
+        live_config_path, tmp_path,
+        "Use the earlier image in this conversation without reopening the file. " + format_instruction,
+        session_id=first["session_id"],
+    )
+    assert json.loads(second["answer"]) == {"left": "red", "right": "blue"}
+    trajectory = (tmp_path / "sessions" / first["session_id"] / "trajectory.jsonl").read_text()
+    events = [json.loads(line) for line in trajectory.splitlines()]
+    starts = [event for event in events if event["event"] == "tool_start" and event["payload"]["name"] == "read_image"]
+    assert len(starts) == 1
+    assert "base64" not in trajectory

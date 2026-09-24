@@ -1,4 +1,4 @@
-"""LangChain agent assembly with the five local tools."""
+"""LangChain agent assembly with local tools."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import Any
 from ..agents.middleware import build_middleware
 from ..config import Config
 from ..context import AgentContext
-from ..tools.filesystem import edit_file, glob, read_file, write_file
+from ..tools.filesystem import edit_file, glob, read_file, read_image, write_file
 from ..tools.shell import bash
 
 
@@ -35,7 +35,7 @@ def build_agent(
 
     return create_agent(
         model=model,
-        tools=[read_file, write_file, edit_file, glob, bash],
+        tools=[read_file, write_file, edit_file, glob, bash, read_image],
         system_prompt=config.system_prompt(workdir),
         middleware=build_middleware(config),
         context_schema=AgentContext,

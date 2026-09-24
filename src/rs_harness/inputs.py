@@ -9,13 +9,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from .config import Config
 
 
 class InputError(ValueError):
     """An invalid or unsupported input that can be reported before model execution."""
+
+
+MAX_IMAGE_BYTES = 32 * 1024 * 1024
 
 
 def _deepseek_vision(config: Config | None) -> bool:
@@ -41,6 +44,25 @@ def _image_mime(header: bytes) -> str:
     if header.startswith(b"RIFF") and header[8:12] == b"WEBP":
         return "image/webp"
     raise InputError("unsupported_image_format: expected JPEG, PNG, GIF, or WebP content")
+
+
+def load_local_image(path: Path, *, max_encoded_bytes: int | None = None) -> dict:
+    """Read a local image with a bounded allocation and return a standard image block."""
+    try:
+        if not path.is_file():
+            raise InputError(f"image_not_found_or_not_regular: {path}")
+        with path.open("rb") as handle:
+            data = handle.read(MAX_IMAGE_BYTES + 1)
+        if not data:
+            raise InputError(f"empty_image: {path}")
+        if len(data) > MAX_IMAGE_BYTES:
+            raise InputError("image_too_large: local image files are limited to 32 MiB")
+        if max_encoded_bytes is not None and 4 * ((len(data) + 2) // 3) >= max_encoded_bytes:
+            raise InputError("image_payload_too_large: base64 alone reaches the 48 MiB DeepSeek request limit")
+        mime = _image_mime(data[:16])
+        return {"type": "image", "base64": base64.b64encode(data).decode("ascii"), "mime_type": mime}
+    except OSError as exc:
+        raise InputError(f"unable_to_read_image: {path}: {exc}") from exc
 
 
 def build_human_message(
@@ -73,21 +95,9 @@ def build_human_message(
         path = Path(source).expanduser()
         if not path.is_absolute():
             path = Path(workdir or Path.cwd()) / path
-        try:
-            if not path.is_file():
-                raise InputError(f"image_not_found_or_not_regular: {path}")
-            with path.open("rb") as handle:
-                data = handle.read(32 * 1024 * 1024 + 1)
-            if not data:
-                raise InputError(f"empty_image: {path}")
-            if len(data) > 32 * 1024 * 1024:
-                raise InputError("image_too_large: local image files are limited to 32 MiB")
-            encoded_bytes += 4 * ((len(data) + 2) // 3)
-            if known_limits and encoded_bytes >= 48 * 1024 * 1024:
-                raise InputError("image_payload_too_large: base64 alone reaches the 48 MiB DeepSeek request limit")
-            blocks.append({"type": "image", "base64": base64.b64encode(data).decode("ascii"), "mime_type": _image_mime(data[:16])})
-        except OSError as exc:
-            raise InputError(f"unable_to_read_image: {path}: {exc}") from exc
+        block = load_local_image(path, max_encoded_bytes=48 * 1024 * 1024 - encoded_bytes if known_limits else None)
+        encoded_bytes += len(block["base64"])
+        blocks.append(block)
     message = HumanMessage(content_blocks=blocks)
     validate_image_messages([message], config)
     return message
@@ -109,7 +119,7 @@ def validate_human_message(message: HumanMessage) -> None:
         raise ValueError("empty_input")
 
 
-def summarize_message_content(message: HumanMessage) -> str | list:
+def summarize_message_content(message: BaseMessage) -> str | list:
     """A trajectory-friendly copy of message content with inline image payloads replaced by digests."""
     content = message.content
     if isinstance(content, str):

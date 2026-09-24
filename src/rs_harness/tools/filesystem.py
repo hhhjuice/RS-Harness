@@ -1,4 +1,4 @@
-"""UTF-8 file tools with Agent-managed approval for external paths."""
+"""Local file tools with Agent-managed approval for external paths."""
 
 from pathlib import Path
 
@@ -7,6 +7,7 @@ from langchain_core.tools import ToolException
 from pydantic import BaseModel, Field
 
 from ..context import AgentContext
+from ..inputs import load_local_image
 from . import NonBlank
 
 
@@ -100,6 +101,20 @@ def read_file(path: str, runtime: ToolRuntime[AgentContext], offset: int = 1, li
         }
     except (OSError, UnicodeError, ValueError) as exc:
         raise ToolException(f"read_file: {exc}") from exc
+
+
+@tool(args_schema=PathInput)
+def read_image(path: str, runtime: ToolRuntime[AgentContext]) -> list[dict]:
+    """View a local JPEG, PNG, GIF, or WebP image up to 32 MiB. External paths require Agent approval."""
+    try:
+        target = _file_path(path, runtime.context.workdir)
+        block = load_local_image(target)
+        return [
+            {"type": "text", "text": f"Image loaded from {_display_path(target, runtime.context.workdir)}"},
+            block,
+        ]
+    except (OSError, ValueError) as exc:
+        raise ToolException(f"read_image: {exc}") from exc
 
 
 @tool(args_schema=WriteInput)

@@ -9,6 +9,9 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from langchain_core.callbacks import AsyncCallbackHandler
+from langchain_core.messages import ToolMessage
+
+from ..inputs import summarize_message_content
 
 
 class TrajectoryWriter:
@@ -122,6 +125,8 @@ class TrajectoryRecorder(AsyncCallbackHandler):
         self, output: Any, *, run_id: UUID, parent_run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
+        if isinstance(output, ToolMessage):
+            output = output.model_copy(update={"content": summarize_message_content(output)})
         self.writer.append(
             "tool_end", {"output": _jsonable(output)},
             run_id=run_id, parent_run_id=parent_run_id,

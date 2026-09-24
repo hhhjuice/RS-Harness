@@ -31,7 +31,7 @@ async def test_all_five_production_tools_and_recording(config, tmp_path):
     result = await ask(config, session.session_id, "run tools", model=model)
     assert result.status == "succeeded", result.error
     assert (tmp_path / "note.txt").read_text() == "second"
-    assert {bound.name for bound in model.bound_tools} == {"read_file", "write_file", "edit_file", "glob", "bash", "write_todos"}
+    assert {bound.name for bound in model.bound_tools} == {"read_file", "write_file", "edit_file", "glob", "bash", "read_image", "write_todos"}
     for bound in model.bound_tools:
         assert not {"runtime", "workdir", "bash_timeout_s", "max_tool_output_bytes"} & bound.tool_call_schema.model_fields.keys()
     messages = {message.tool_call_id: message for message in model.inputs[-1] if isinstance(message, ToolMessage)}

@@ -21,7 +21,7 @@ def test_literal_bash_policy(tmp_path, command, expected):
     assert bool(reason) == (expected != "allow")
 
 
-@pytest.mark.parametrize("name", ["read_file", "write_file", "edit_file"])
+@pytest.mark.parametrize("name", ["read_file", "write_file", "edit_file", "read_image"])
 @pytest.mark.parametrize("kind", ["relative", "absolute", "symlink", "symlink_parent", "inside"])
 def test_file_policy_uses_resolved_session_workdir(tmp_path, name, kind):
     workdir = tmp_path / "workspace"
@@ -50,7 +50,7 @@ def test_file_policy_uses_resolved_session_workdir(tmp_path, name, kind):
 
 
 @pytest.mark.parametrize("arguments", [{}, {"path": None}, {"path": 3}, {"path": []}, {"path": ""}, {"path": "\x00"}, {"command": None}, {"command": 4}])
-@pytest.mark.parametrize("name", ["read_file", "write_file", "edit_file", "bash", "glob"])
+@pytest.mark.parametrize("name", ["read_file", "write_file", "edit_file", "read_image", "bash", "glob"])
 def test_invalid_arguments_are_left_to_tool_validation(tmp_path, name, arguments):
     assert classify_tool_call({"name": name, "args": arguments}, str(tmp_path)) == ("allow", "")
 

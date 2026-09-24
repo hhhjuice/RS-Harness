@@ -365,7 +365,7 @@ def test_production_agent_factory_wires_middleware_and_context(config, monkeypat
     assert result is not None
     assert captured["context_schema"] is AgentContext
     assert captured["checkpointer"] == "checkpoint"
-    assert {tool.name for tool in captured["tools"]} == {"read_file", "write_file", "edit_file", "glob", "bash"}
+    assert {tool.name for tool in captured["tools"]} == {"read_file", "write_file", "edit_file", "glob", "bash", "read_image"}
     assert len(captured["middleware"]) == 7
     assert isinstance(captured["middleware"][0], HumanInTheLoopMiddleware)
     assert isinstance(captured["middleware"][1], ModelCallLimitMiddleware)

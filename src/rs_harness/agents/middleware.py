@@ -32,7 +32,7 @@ def classify_tool_call(tool_call: dict, workdir: str) -> tuple[Literal["deny", "
             for pattern in ("rm ", "> /etc/", "chmod 777"):
                 if pattern in command:
                     return "ask", f"Bash requires approval: contains dangerous substring {pattern!r}"
-    elif name in {"read_file", "write_file", "edit_file"}:
+    elif name in {"read_file", "write_file", "edit_file", "read_image"}:
         path = arguments.get("path")
         if isinstance(path, str) and path.strip():
             try:
@@ -71,17 +71,43 @@ def _tool_error(error: Exception, request) -> str | None:
     return None
 
 
+def _project_image_tool_results(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """Send tool images as user content, after the complete tool batch, without changing state."""
+    projected = []
+    pending = []
+    for message in messages:
+        if not isinstance(message, ToolMessage) and pending:
+            projected.append(HumanMessage(content_blocks=pending))
+            pending = []
+        if (
+            isinstance(message, ToolMessage) and message.name == "read_image"
+            and message.status == "success" and isinstance(message.content, list)
+        ):
+            pending.extend(message.content)
+            text = "\n".join(
+                block["text"] for block in message.content
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+            projected.append(message.model_copy(update={"content": text}))
+        else:
+            projected.append(message)
+    if pending:
+        projected.append(HumanMessage(content_blocks=pending))
+    return projected
+
+
 class ImageInputMiddleware(AgentMiddleware):
     def __init__(self, config: Config):
         self.config = config
 
     async def awrap_model_call(self, request, handler):
+        messages = _project_image_tool_results(request.messages)
         try:
-            validate_image_messages(request.messages, self.config, getattr(request.model, "profile", None))
+            validate_image_messages(messages, self.config, getattr(request.model, "profile", None))
         except InputError as exc:
             await _notify_middleware(self.name, "error", str(exc), error_type=type(exc).__name__)
             raise
-        return await handler(request)
+        return await handler(request.override(messages=messages))
 
 
 async def _notify_middleware(name: str, status: str, detail: str, *, error_type: str | None = None) -> None:
@@ -129,7 +155,7 @@ def build_middleware(config: Config) -> list[AgentMiddleware]:
                     "when": needs_approval,
                     "description": _approval_description,
                 }
-                for name in ("read_file", "write_file", "edit_file", "bash")
+                for name in ("read_file", "write_file", "edit_file", "read_image", "bash")
             },
             "glob": False,
         }),
