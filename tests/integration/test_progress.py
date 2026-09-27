@@ -22,7 +22,7 @@ def call(name: str, args: dict, call_id: str) -> dict:
 
 
 def install_agent(monkeypatch, tools):
-    def build_agent(loaded_config, *, workdir, checkpointer=None, model=None):
+    def build_agent(loaded_config, *, workdir, checkpointer=None, model=None, subagents=None):
         return create_agent(
             model=model,
             tools=list(tools),
@@ -53,7 +53,7 @@ class RecordingStream(io.StringIO):
 
 
 @pytest.mark.asyncio
-async def test_tool_progress_is_reported_after_side_effect(config, tmp_path, monkeypatch):
+async def test_tool_start_is_reported_before_side_effect_and_completion_after(config, tmp_path, monkeypatch):
     stream = RecordingStream()
     monkeypatch.setattr("rs_harness.progress.sys.stderr", stream)
     observed: list[str] = []
@@ -76,8 +76,13 @@ async def test_tool_progress_is_reported_after_side_effect(config, tmp_path, mon
 
     assert result.status == "succeeded", result.error
     assert (tmp_path / "marker").read_text(encoding="utf-8") == "done"
-    assert observed and "[Tool]" not in observed[0]
-    assert "[Tool] Running touch (" in stream.text()
+    assert observed and "[Tool] Running touch " in observed[0]
+    assert "[Tool] Completed" not in observed[0]
+    output = stream.text()
+    assert output.count("[Tool] Running touch ") == 1
+    assert "[Tool] Running touch (" not in output
+    assert output.count("[Tool] Completed touch (") == 1
+    assert output.index("[Tool] Running touch ") < output.index("[Tool] Completed touch (")
 
 
 @pytest.mark.asyncio
@@ -117,10 +122,12 @@ async def test_parallel_tools_report_completion_in_completion_order(config, tmp_
 
     assert result.status == "succeeded", result.error
     output = stream.text()
-    completions = [line for line in output.splitlines() if line.startswith("[Tool] Running inspect (")]
+    starts = [line for line in output.splitlines() if line.startswith("[Tool] Running inspect ")]
+    assert len(starts) == 2 and all("inspect (" not in line for line in starts)
+    completions = [line for line in output.splitlines() if line.startswith("[Tool] Completed inspect (")]
     assert len(completions) == 2
     for line, path in zip(completions, ("fast.txt", "slow.txt"), strict=True):
-        assert line.startswith("[Tool] Running inspect (")
+        assert line.startswith("[Tool] Completed inspect (")
         assert line.endswith(f') {{"path":"{path}"}}')
 
 
@@ -155,7 +162,8 @@ async def test_denied_and_approved_tools_report_real_execution_only(config, tmp_
     resumed = await application.resume(config, approved_session.session_id, decision, model=approved_model, callbacks=[CliProgress()])
     assert resumed.status == "succeeded", resumed.error
     assert not target.exists()
-    assert "[Tool] Running bash (" in approved_stream.text()
+    assert "[Tool] Running bash " in approved_stream.text()
+    assert "[Tool] Completed bash (" in approved_stream.text()
 
 
 @pytest.mark.asyncio
@@ -230,8 +238,8 @@ async def test_stop_hook_continuation_reports_action_without_message_content(con
     def check(messages):
         return "private continuation instruction" if messages[-1].content == "draft" else None
 
-    def with_stop_hook(config):
-        middleware = build_middleware(config)
+    def with_stop_hook(config, **kwargs):
+        middleware = build_middleware(config, **kwargs)
         middleware[-1] = StopHookMiddleware((check,))
         return middleware
 
@@ -279,8 +287,8 @@ async def test_fatal_error_reason_is_reported_once(config, tmp_path, monkeypatch
         def check(messages):
             raise RuntimeError("stop check failed")
 
-        def with_stop_hook(config):
-            middleware = build_middleware(config)
+        def with_stop_hook(config, **kwargs):
+            middleware = build_middleware(config, **kwargs)
             middleware[-1] = StopHookMiddleware((check,))
             return middleware
 
@@ -329,6 +337,9 @@ async def test_handled_tool_error_has_one_notice_and_agent_can_continue(config, 
     assert result.status == "succeeded", result.error
     output = capsys.readouterr()
     assert output.out == "recovered\n"
+    assert output.err.count("[Tool] Running read_file ") == 1
+    assert "[Tool] Completed read_file" not in output.err
+    assert output.err.index("[Tool] Running read_file ") < output.err.index("[Tool] Failed read_file (")
     assert output.err.count("Failed") == 1
     assert output.err.count("ToolError" if error_message else "ToolException") == 1
     assert "missing.txt" in output.err
@@ -378,8 +389,8 @@ async def test_control_flow_is_not_reported_as_failure(config, tmp_path, monkeyp
         async def check(messages):
             await interrupt()
 
-        def with_stop_hook(config):
-            middleware = build_middleware(config)
+        def with_stop_hook(config, **kwargs):
+            middleware = build_middleware(config, **kwargs)
             middleware[-1] = StopHookMiddleware((check,))
             return middleware
 
@@ -399,14 +410,15 @@ async def test_control_flow_is_not_reported_as_failure(config, tmp_path, monkeyp
 
     output = capsys.readouterr().err
     assert "failed" not in output
-    assert "Running" not in output
+    assert output.count("[Tool] Running abort") == int(stage == "tool")
+    assert "[Tool] Completed" not in output
     assert "[Middleware]" not in output
 
 
 @pytest.mark.parametrize("feedback", [None, ""])
 async def test_stop_hook_without_continuation_is_silent(config, tmp_path, monkeypatch, capsys, feedback):
-    def with_stop_hook(config):
-        middleware = build_middleware(config)
+    def with_stop_hook(config, **kwargs):
+        middleware = build_middleware(config, **kwargs)
         middleware[-1] = StopHookMiddleware((lambda messages: feedback,))
         return middleware
 

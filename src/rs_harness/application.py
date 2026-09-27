@@ -13,7 +13,7 @@ from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
 
 from .agents.main import build_agent
-from .config import Config
+from .config import Config, subagents_digest
 from .context import AgentContext
 from .inputs import build_human_message, extract_answer, summarize_message_content, validate_human_message, validate_image_messages
 from .sessions.catalog import Session, SessionCatalog, SessionError
@@ -125,9 +125,16 @@ async def _run_interaction(
         session = SessionCatalog.open(config, session_id)
         session_status = session.meta.status
         with session.interaction_lock():
+            subagents = config.resolve_subagents()
+            if subagents_digest(subagents) != session.meta.subagents_digest:
+                raise SessionError(
+                    "subagent_config_mismatch: Subagent definitions changed. Restore the original "
+                    "ids, prompts, tools and persistence modes, or create a new session."
+                )
             async with open_checkpointer(config) as checkpointer:
                 agent = build_agent(
                     config, workdir=session.meta.workdir, checkpointer=checkpointer, model=model,
+                    subagents=subagents,
                 )
                 snapshot = await agent.aget_state({"configurable": {"thread_id": session_id}})
                 pending = _approval_status(session, snapshot)

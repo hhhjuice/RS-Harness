@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from asyncio import CancelledError
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,7 @@ from uuid import UUID, uuid4
 
 from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.messages import ToolMessage
+from langgraph.errors import GraphBubbleUp
 
 from ..inputs import summarize_message_content
 
@@ -57,6 +59,35 @@ class TrajectoryRecorder(AsyncCallbackHandler):
         super().__init__()
         self.writer = writer
 
+    async def on_chain_start(
+        self, serialized, inputs, *, run_id: UUID, parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self.writer.append(
+            "chain_start", {
+                "name": kwargs.get("name") or (serialized or {}).get("name"),
+                **{key: value for key, value in (kwargs.get("metadata") or {}).items()
+                   if key in {"subagent_id", "subagent_name"}},
+            },
+            run_id=run_id, parent_run_id=parent_run_id,
+        )
+
+    async def on_chain_end(
+        self, outputs, *, run_id: UUID, parent_run_id: UUID | None = None, **kwargs: Any,
+    ) -> None:
+        self.writer.append("chain_end", run_id=run_id, parent_run_id=parent_run_id)
+
+    async def on_chain_error(
+        self, error: BaseException, *, run_id: UUID, parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        if isinstance(error, (GraphBubbleUp, CancelledError)):
+            return
+        self.writer.append(
+            "chain_error", {"type": type(error).__name__, "message": str(error)},
+            run_id=run_id, parent_run_id=parent_run_id,
+        )
+
     async def on_chat_model_start(
         self,
         serialized: dict[str, Any],
@@ -99,6 +130,8 @@ class TrajectoryRecorder(AsyncCallbackHandler):
         parent_run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
+        if isinstance(error, (GraphBubbleUp, CancelledError)):
+            return
         self.writer.append(
             "model_error",
             {"type": type(error).__name__, "message": str(error)},
@@ -136,6 +169,8 @@ class TrajectoryRecorder(AsyncCallbackHandler):
         self, error: BaseException, *, run_id: UUID, parent_run_id: UUID | None = None,
         **kwargs: Any,
     ) -> None:
+        if isinstance(error, (GraphBubbleUp, CancelledError)):
+            return
         self.writer.append(
             "tool_error",
             {"type": type(error).__name__, "message": str(error), "tool_call_id": kwargs.get("tool_call_id")},

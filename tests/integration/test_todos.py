@@ -84,7 +84,7 @@ async def test_production_binding_and_simple_answer_without_plan(config, tmp_pat
     assert result.answer == "Hello"
     assert model.call_count == 1
     assert Counter(tool.name for tool in model.bound_tools) == Counter([
-        "write_todos", "read_file", "write_file", "edit_file", "glob", "bash", "read_image",
+        "write_todos", "read_file", "write_file", "edit_file", "glob", "bash", "read_image", "delegate_task",
     ])
     system = [message for message in model.inputs[0] if isinstance(message, SystemMessage)]
     assert len(system) == 1
@@ -314,8 +314,8 @@ async def test_stop_hook_can_update_plan_with_same_interaction_and_budget(config
         checks.append(messages[-1].content)
         return "Update the plan" if messages[-1].content == "Draft" else None
 
-    def with_hook(config):
-        middleware = build_middleware(config)
+    def with_hook(config, **kwargs):
+        middleware = build_middleware(config, **kwargs)
         middleware[-1] = StopHookMiddleware((check,))
         return middleware
 

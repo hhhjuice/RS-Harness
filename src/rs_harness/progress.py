@@ -98,8 +98,8 @@ class CliProgress(AsyncCallbackHandler):
     def __init__(self) -> None:
         self._tools: dict[UUID, tuple[str, float, str]] = {}
         self._middleware: dict[UUID, str] = {}
+        self._hidden_runs: set[UUID] = set()
         self._model_count = 0
-        self._approval_counts: tuple[int, int] | None = None
         self._reported_errors: set[tuple[str, str]] = set()
 
     def _write(self, message: str, *, plan: bool = False) -> bool:
@@ -118,28 +118,34 @@ class CliProgress(AsyncCallbackHandler):
             self._reported_errors.add((kind, message))
 
     async def on_chat_model_start(self, serialized, messages, **kwargs: Any) -> None:
+        if kwargs.get("parent_run_id") in self._hidden_runs:
+            return
         self._model_count += 1
         self._write(f"[Model] Call {self._model_count}")
 
     async def on_chain_start(self, serialized, inputs, *, run_id: UUID, **kwargs: Any) -> None:
         name = kwargs.get("name") or (serialized or {}).get("name", "")
-        if name == "rsh_agent" and isinstance(inputs, Command) and isinstance(inputs.resume, dict):
+        if kwargs.get("parent_run_id") in self._hidden_runs:
+            self._hidden_runs.add(run_id)
+            return
+        if name == "rsh_agent" and kwargs.get("parent_run_id") is None and isinstance(inputs, Command) and isinstance(inputs.resume, dict):
             decisions = [decision["type"] for batch in inputs.resume.values() for decision in batch["decisions"]]
-            self._approval_counts = (decisions.count("approve"), decisions.count("reject"))
+            self._write(f"[Approval] Submitted decisions: {decisions.count('approve')} approve, {decisions.count('reject')} reject")
         _, separator, hook = name.rpartition(".")
         if separator and hook in _HOOKS:
             self._middleware[run_id] = name
 
     async def on_chain_end(self, outputs, *, run_id: UUID, **kwargs: Any) -> None:
         name = self._middleware.pop(run_id, None)
+        self._hidden_runs.discard(run_id)
+        if kwargs.get("parent_run_id") is None:
+            self._hidden_runs.clear()
+            self._tools.clear()
+            self._middleware.clear()
         if not name or not isinstance(outputs, dict):
             return
         if name == "StopHookMiddleware.after_agent" and outputs.get("jump_to") == "model":
             self._write(f"[Middleware] {_preview(name)} · continuing model execution")
-        elif name == "HumanInTheLoopMiddleware.after_model" and outputs.get("messages") and self._approval_counts is not None:
-            approved, rejected = self._approval_counts
-            self._approval_counts = None
-            self._write(f"[Approval] Decisions: {approved} approved, {rejected} rejected")
         elif name == "TodoListMiddleware.after_model":
             rejected = [message for message in outputs.get("messages", []) if isinstance(message, ToolMessage) and message.status == "error"]
             if rejected:
@@ -151,12 +157,17 @@ class CliProgress(AsyncCallbackHandler):
 
     async def on_chain_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
         name = self._middleware.pop(run_id, None)
+        self._hidden_runs.discard(run_id)
+        if kwargs.get("parent_run_id") is None:
+            self._hidden_runs.clear()
+            self._tools.clear()
+            self._middleware.clear()
         if name and not isinstance(error, (GraphBubbleUp, CancelledError)):
             detail = "Model call budget exhausted; stopping further calls" if type(error).__name__ == "ModelCallLimitExceededError" else None
             self._report_error(f"[Middleware] {_preview(name)} · failed", type(error).__name__, str(error), detail=detail)
 
     async def on_custom_event(self, name: str, data: Any, **kwargs: Any) -> None:
-        if name != "rsh.middleware" or not isinstance(data, dict):
+        if name != "rsh.middleware" or not isinstance(data, dict) or kwargs.get("run_id") in self._hidden_runs:
             return
         label = f"[Middleware] {_preview(data.get('name', 'unknown'))}"
         if data.get("status") == "blocked":
@@ -169,21 +180,30 @@ class CliProgress(AsyncCallbackHandler):
         inputs: dict[str, Any] | None = None, **kwargs: Any,
     ) -> None:
         name = str((serialized or {}).get("name") or "unknown")
+        if kwargs.get("parent_run_id") in self._hidden_runs:
+            self._hidden_runs.add(run_id)
+            return
+        if name == "delegate_task":
+            self._hidden_runs.add(run_id)
         summary = _arguments(inputs)
         self._tools[run_id] = (name, monotonic(), summary)
+        if name != "write_todos":
+            self._write(f"[Tool] Running {_preview(name)} {summary}".rstrip())
 
     async def on_tool_end(self, output: Any, *, run_id: UUID, **kwargs: Any) -> None:
         run = self._tools.pop(run_id, None)
+        self._hidden_runs.discard(run_id)
         if run is None:
             return
         name, started, summary = run
         elapsed = monotonic() - started
         if getattr(output, "status", None) == "error":
             prefix = "[Todo] Update failed" if name == "write_todos" else f"[Tool] Failed {_preview(name)} ({elapsed:.2f}s) {summary}".rstrip()
-            self._report_error(prefix, "ToolError", str(output.content), plan=name == "write_todos")
+            detail = "Delegated task failed" if name == "delegate_task" else None
+            self._report_error(prefix, "ToolError", str(output.content), detail=detail, plan=name == "write_todos")
             return
         if name != "write_todos":
-            self._write(f"[Tool] Running {_preview(name)} ({elapsed:.2f}s) {summary}".rstrip())
+            self._write(f"[Tool] Completed {_preview(name)} ({elapsed:.2f}s) {summary}".rstrip())
         update = getattr(output, "update", None)
         if name == "write_todos" and isinstance(update, dict) and isinstance(update.get("todos"), list):
             todos = update["todos"]
@@ -193,11 +213,12 @@ class CliProgress(AsyncCallbackHandler):
 
     async def on_tool_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
         run = self._tools.pop(run_id, None)
+        self._hidden_runs.discard(run_id)
         if run is not None and not isinstance(error, (GraphBubbleUp, CancelledError)):
             name, started, summary = run
             prefix = "[Todo] Update failed" if name == "write_todos" else f"[Tool] Failed {_preview(name)} ({monotonic() - started:.2f}s) {summary}".rstrip()
-            detail = None
-            if isinstance(error, ValidationError):
+            detail = "Delegated task failed" if name == "delegate_task" else None
+            if isinstance(error, ValidationError) and name != "delegate_task":
                 issue = error.errors(include_input=False, include_url=False)[0]
                 detail = f"{'.'.join(map(str, issue['loc']))}: {issue['msg']}"
             self._report_error(prefix, type(error).__name__, str(error), detail=detail, plan=name == "write_todos")

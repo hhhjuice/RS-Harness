@@ -301,7 +301,7 @@ async def test_multiple_real_interrupt_ids_route_in_reverse_mapping_order(config
     graph.add_node("finish", lambda state: {"messages": [AIMessage(content=f'{state["left"]}/{state["right"]}')]})
     graph.add_edge(["left", "right"], "finish")
     graph.add_edge("finish", END)
-    monkeypatch.setattr(application, "build_agent", lambda config, *, workdir, checkpointer, model: graph.compile(checkpointer=checkpointer))
+    monkeypatch.setattr(application, "build_agent", lambda config, *, workdir, checkpointer, model, subagents: graph.compile(checkpointer=checkpointer))
     session = create_session(config, workdir=str(tmp_path))
     pending = await ask(config, session.session_id, "run")
     assert len(pending.interrupts) == 2

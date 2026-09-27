@@ -1,4 +1,4 @@
-"""Local file tools with Agent-managed approval for external paths."""
+"""Local file tools with Agent-managed permission checks for external paths."""
 
 from pathlib import Path
 
@@ -12,7 +12,7 @@ from . import NonBlank
 
 
 class PathInput(BaseModel):
-    path: NonBlank = Field(description="Relative or absolute file path. Access outside the workspace requires Agent approval.")
+    path: NonBlank = Field(description="Relative or absolute file path. External paths require main-agent approval and are denied to subagents.")
 
 
 class ReadInput(PathInput):
@@ -53,7 +53,7 @@ def _display_path(target: Path, workdir: str) -> str:
 
 @tool(args_schema=ReadInput)
 def read_file(path: str, runtime: ToolRuntime[AgentContext], offset: int = 1, limit: int = 200) -> dict:
-    """Read UTF-8 text with line and output limits. External paths require Agent approval."""
+    """Read UTF-8 text with line and output limits. External paths require main-agent approval and are denied to subagents."""
     try:
         target = _file_path(path, runtime.context.workdir)
         display_path = _display_path(target, runtime.context.workdir)
@@ -105,7 +105,7 @@ def read_file(path: str, runtime: ToolRuntime[AgentContext], offset: int = 1, li
 
 @tool(args_schema=PathInput)
 def read_image(path: str, runtime: ToolRuntime[AgentContext]) -> list[dict]:
-    """View a local JPEG, PNG, GIF, or WebP image up to 32 MiB. External paths require Agent approval."""
+    """View a local JPEG, PNG, GIF, or WebP image up to 32 MiB. External paths require main-agent approval and are denied to subagents."""
     try:
         target = _file_path(path, runtime.context.workdir)
         block = load_local_image(target)
@@ -119,7 +119,7 @@ def read_image(path: str, runtime: ToolRuntime[AgentContext]) -> list[dict]:
 
 @tool(args_schema=WriteInput)
 def write_file(path: str, content: str, runtime: ToolRuntime[AgentContext]) -> dict:
-    """Create or overwrite a file with an existing parent. External paths require Agent approval."""
+    """Create or overwrite a file with an existing parent. External paths require main-agent approval and are denied to subagents."""
     try:
         target = _file_path(path, runtime.context.workdir)
         display_path = _display_path(target, runtime.context.workdir)
@@ -131,7 +131,7 @@ def write_file(path: str, content: str, runtime: ToolRuntime[AgentContext]) -> d
 
 @tool(args_schema=EditInput)
 def edit_file(path: str, old_text: str, new_text: str, runtime: ToolRuntime[AgentContext]) -> dict:
-    """Replace one unique exact text match in a file. External paths require Agent approval."""
+    """Replace one unique exact text match in a file. External paths require main-agent approval and are denied to subagents."""
     try:
         target = _file_path(path, runtime.context.workdir)
         display_path = _display_path(target, runtime.context.workdir)

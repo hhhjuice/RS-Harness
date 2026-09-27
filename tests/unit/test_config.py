@@ -110,21 +110,7 @@ def test_max_model_calls_must_be_a_positive_integer(tmp_path, rendered):
 
 def test_max_model_calls_can_be_configured(config, tmp_path):
     config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        "\n".join(
-            [
-                "[model]",
-                'model = "test-model"',
-                'api_key = "test-key"',
-                "",
-                "[runtime]",
-                "max_model_calls = 3",
-                f'sessions_dir = "{config.runtime.sessions_dir}"',
-                f'system_prompt_file = "{config.runtime.system_prompt_file}"',
-            ]
-        ),
-        encoding="utf-8",
-    )
+    config_path.write_text(config_path.read_text().replace("[runtime]", "[runtime]\nmax_model_calls = 3"))
 
     loaded = Config.load(config_path)
     assert loaded.runtime.max_model_calls == 3
@@ -136,10 +122,10 @@ def test_api_key_comes_from_toml(config, monkeypatch):
 
 
 @pytest.mark.parametrize("key_setting", ['', 'api_key = ""', 'api_key = "   "'])
-def test_missing_api_key_is_actionable(tmp_path, monkeypatch, key_setting):
+def test_missing_api_key_is_actionable(config, tmp_path, monkeypatch, key_setting):
     monkeypatch.setenv("OPENAI_API_KEY", "unused-environment-key")
     config_path = tmp_path / "config.toml"
-    config_path.write_text(f'[model]\nmodel = "test-model"\n{key_setting}\n')
+    config_path.write_text(config_path.read_text().replace('api_key = "test-key"', key_setting))
     config = Config.load(config_path)
     with pytest.raises(ConfigError, match="model.api_key") as error:
         config.api_key()
@@ -162,11 +148,11 @@ def test_invalid_config_does_not_echo_secret(tmp_path):
     assert "private-test-key" not in str(error.value)
 
 
-def test_dotenv_is_not_loaded(tmp_path, monkeypatch):
+def test_dotenv_is_not_loaded(config, tmp_path, monkeypatch):
     monkeypatch.delenv("RSH_UNUSED_DOTENV_VALUE", raising=False)
     (tmp_path / ".env").write_text("RSH_UNUSED_DOTENV_VALUE=unused\n")
     config_path = tmp_path / "config.toml"
-    config_path.write_text('[model]\nmodel = "test"\napi_key = "toml-key"\n')
+    config_path.write_text(config_path.read_text().replace('api_key = "test-key"', 'api_key = "toml-key"'))
     config = Config.load(config_path)
     assert config.api_key() == "toml-key"
     assert "RSH_UNUSED_DOTENV_VALUE" not in os.environ

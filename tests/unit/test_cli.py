@@ -15,22 +15,6 @@ from tests.images import write_test_image
 def test_create_and_list_session(config, tmp_path):
     runner = CliRunner()
     config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        "\n".join(
-            [
-                "[model]",
-                'model = "test-model"',
-                'api_key = "test-key"',
-                "",
-                "[runtime]",
-                f'sessions_dir = "{config.runtime.sessions_dir}"',
-                f'system_prompt_file = "{config.runtime.system_prompt_file}"',
-                'checkpoint_file = "checkpoints.sqlite3"',
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
     created = runner.invoke(app, ["create-session", "--config", str(config_path), "--json"])
     assert created.exit_code == 0, created.output
     assert json.loads(created.output)["session_id"]
@@ -256,14 +240,15 @@ def test_cli_progress_previews_tools_without_sensitive_values(capsys):
 
     asyncio.run(run())
     output = capsys.readouterr().err
-    assert "[Tool] Running bash (" in output
+    assert "[Tool] Running bash " in output
+    assert "[Tool] Completed bash (" in output
     assert "secret-value" not in output
     assert "\\u001b" in output
     assert "secret output" not in output
     assert "private content" not in output
-    assert output.count('"path":"note.txt"') == 1
-    assert output.count("15 chars") == 1
-    assert output.count("…") == 1
+    assert output.count('"path":"note.txt"') == 2
+    assert output.count("15 chars") == 2
+    assert output.count("…") == 2
     assert max(map(len, output.splitlines())) < 200
     assert "\x1b" not in output
 
@@ -304,8 +289,8 @@ async def test_tool_notices_reuse_redacted_operation(capsys, command, outcome):
         await progress.on_tool_error(RuntimeError("failed"), run_id=run_id)
 
     output = capsys.readouterr().err
-    assert len(output.splitlines()) == 1
-    end = output.splitlines()[0]
+    assert len(output.splitlines()) == 2
+    start, end = output.splitlines()
     summary = end.split(") ", 1)[1]
     assert "[redacted]" in summary
     assert "credential1" not in output
@@ -314,7 +299,7 @@ async def test_tool_notices_reuse_redacted_operation(capsys, command, outcome):
     assert "private result" not in output
     if outcome == "success":
         assert len(summary) <= 160
-        assert "Running bash (" in end
+        assert "Completed bash (" in end
         assert end.endswith(") " + summary)
     else:
         kind = "ToolError" if outcome == "error_status" else "RuntimeError"
@@ -323,6 +308,7 @@ async def test_tool_notices_reuse_redacted_operation(capsys, command, outcome):
         assert len(summary) <= 160
         assert "Failed bash (" in end
         assert end.endswith(") " + summary + suffix)
+    assert start == "[Tool] Running bash " + summary
 
 
 @pytest.mark.parametrize("command", [
@@ -354,10 +340,11 @@ async def test_tool_notices_preserve_non_sensitive_operation(capsys, command):
     await progress.on_tool_end("done", run_id=run_id)
 
     output = capsys.readouterr().err
-    assert len(output.splitlines()) == 1
-    end = output.splitlines()[0]
+    assert len(output.splitlines()) == 2
+    start, end = output.splitlines()
     summary = json.dumps({"command": command}, ensure_ascii=False, separators=(",", ":"))
-    assert end.startswith("[Tool] Running bash (")
+    assert start == "[Tool] Running bash " + summary
+    assert end.startswith("[Tool] Completed bash (")
     assert end.endswith(") " + summary)
 
 
@@ -389,7 +376,8 @@ def test_ask_progress_stays_on_stderr(config, tmp_path, monkeypatch, as_json):
         assert result.stderr == ""
     else:
         assert result.stdout == "done\n"
-        assert "[Tool] Running write_file (" in result.stderr
+        assert "[Tool] Running write_file " in result.stderr
+        assert "[Tool] Completed write_file (" in result.stderr
         assert "[Middleware]" not in result.stderr
         assert "[Model] Call 2" in result.stderr
         assert "note.txt" in result.stderr
@@ -552,7 +540,7 @@ def test_pipe_never_consumes_next_line_as_approval(config, tmp_path, monkeypatch
     assert "Action 1:" not in result.output
     assert "rm file.txt" in result.stderr
     assert result.stderr.count("Waiting for approval (1 item)") == 1
-    assert "Decisions:" not in result.stderr
+    assert "Submitted decisions:" not in result.stderr
     assert (tmp_path / "file.txt").read_text() == "keep"
     assert model.call_count == 1
     assert SessionCatalog.open(config, session.session_id).meta.status == "running"

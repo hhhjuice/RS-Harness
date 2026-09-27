@@ -138,8 +138,8 @@ model = ScriptedModel([
     ]), AIMessage(content="permission-result"),
 ])
 original_build = application.build_agent
-def build(config, *, workdir, checkpointer, model=model):
-    return original_build(config, workdir=workdir, checkpointer=checkpointer, model=model or globals()["model"])
+def build(config, *, workdir, checkpointer, model=model, subagents=None):
+    return original_build(config, workdir=workdir, checkpointer=checkpointer, model=model or globals()["model"], subagents=subagents)
 application.build_agent = build
 cli.main()
 '''
@@ -152,7 +152,7 @@ def begin_review(terminal_cli, tmp_path):
     os.write(master, b"remove\r")
     displayed = read_until("Execute? [yes/no]>".encode())
     assert displayed.count("Waiting for approval (2 items)".encode()) == 1
-    assert "Decisions:".encode() not in displayed
+    assert "Submitted decisions:".encode() not in displayed
     assert b"\x1b[0;33m" in displayed
     assert "Tool: bash".encode() in displayed
     assert "Operation: rm first.txt".encode() in displayed
@@ -169,12 +169,12 @@ def test_terminal_collects_all_decisions_with_no_default_approval(terminal_cli, 
     read_until("Execute? [yes/no]>".encode())
     os.write(master, b"y\r")
     displayed = read_until("Execute? [yes/no]>".encode())
-    assert "Decisions:".encode() not in displayed
+    assert "Submitted decisions:".encode() not in displayed
     assert "Waiting for approval (".encode() not in displayed
     assert (tmp_path / "first.txt").exists()
     os.write(master, b"n\r")
     displayed = read_until(b"permission-result")
-    assert displayed.count("Decisions: 1 approved, 1 rejected".encode()) == 1
+    assert displayed.count("Submitted decisions: 1 approve, 1 reject".encode()) == 1
     assert "failed".encode() not in displayed
     assert "[Model] Call 2".encode() in displayed
     assert "[Model] Call 1".encode() not in displayed
@@ -192,9 +192,9 @@ def test_terminal_model_count_continues_across_approval_and_resets_per_input(ter
     read_until("Execute? [yes/no]>".encode())
     os.write(master, b"n\r")
     interaction = read_until(b"rsh>")
-    assert interaction.count("Decisions: 1 approved, 1 rejected".encode()) == 1
+    assert interaction.count("Submitted decisions: 1 approve, 1 reject".encode()) == 1
     assert "[Model] Call 1".encode() not in interaction
-    assert interaction.index("Decisions:".encode()) < interaction.index("[Model] Call 2".encode())
+    assert interaction.index("Submitted decisions:".encode()) < interaction.index("[Model] Call 2".encode())
     os.write(master, b"another\r")
     read_until("[Model] Call 1".encode())
     read_until(b"rsh>")
@@ -213,7 +213,7 @@ def test_terminal_partial_approval_is_discarded(terminal_cli, config, tmp_path, 
     read_until("Execute? [yes/no]>".encode())
     os.write(master, keys)
     displayed = read_until(b"Use rsh --session-id")
-    assert "Decisions:".encode() not in displayed
+    assert "Submitted decisions:".encode() not in displayed
     assert "failed".encode() not in displayed
     assert terminal_cli[1].wait(timeout=5) == 0
     assert (tmp_path / "first.txt").read_text() == "keep"
@@ -279,3 +279,76 @@ def test_terminal_opens_existing_approval_before_accepting_text(terminal_cli, co
     assert sum(record["event"] == "user_input" for record in records) == 1
     assert not (tmp_path / "first.txt").exists()
     assert (tmp_path / "second.txt").exists()
+
+
+SUBAGENT_SCRIPT = '''
+from langchain_core.messages import AIMessage
+from rs_harness import cli, application
+from rs_harness.agents.main import build_agent
+from tests.models import ScriptedModel
+
+def call(name, args, id):
+    return {"name": name, "args": args, "id": id, "type": "tool_call"}
+parent = ScriptedModel([
+    AIMessage(content="", tool_calls=[call("delegate_task", {"agent_id": "worker", "query": "private-query"}, "delegate")]),
+    AIMessage(content="subagent-complete"),
+])
+worker = ScriptedModel([
+    AIMessage(content="", tool_calls=[
+        call("write_todos", {"todos": [{"content": "private-plan", "status": "completed"}]}, "todo"),
+        call("write_file", {"path": "../outside-child", "content": "forbidden"}, "outside"),
+        call("write_file", {"path": "child-output", "content": "done"}, "inside"),
+        call("read_file", {"path": "private-missing-file"}, "missing"),
+    ]),
+    AIMessage(content="private-child-result"),
+])
+def factory(config, **kwargs):
+    kwargs.pop("model", None)
+    return build_agent(config, model=parent, subagent_model=worker, **kwargs)
+application.build_agent = factory
+cli.main()
+'''
+
+
+def assert_no_child_progress(output):
+    assert not any(marker in output for marker in (
+        "[SubAgent", "[Todo]", "[Middleware]", "[Approval]", "Execute?", "private-", "child-output", "outside-child",
+    ))
+
+
+@pytest.mark.parametrize("terminal_cli", [SUBAGENT_SCRIPT], indirect=True)
+def test_terminal_subagent_is_one_silent_tool(terminal_cli, tmp_path):
+    master, process, read_until = terminal_cli
+    os.write(master, b"delegate\r")
+    output = read_until(b"subagent-complete") + read_until(b"rsh>")
+    text = output.decode()
+    assert_no_child_progress(text)
+    assert text.count("[Tool] Running delegate_task") == 1
+    assert text.count("[Tool] Completed delegate_task (") == 1
+    assert text.index("[Tool] Running delegate_task") < text.index("[Tool] Completed delegate_task (")
+    assert text.count("[Model] Call 1") == text.count("[Model] Call 2") == 1
+    assert "[Model] Call 3" not in text
+    assert (tmp_path / "child-output").read_text() == "done"
+    os.write(master, b"/quit\r")
+    assert process.wait(timeout=5) == 0
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_ask_subagent_is_one_silent_tool(config, tmp_path, as_json):
+    process = subprocess.run([
+        sys.executable, "-c", SUBAGENT_SCRIPT, "ask", "delegate",
+        "--config", str(tmp_path / "config.toml"), "--workdir", str(tmp_path),
+        *(["--json"] if as_json else []),
+    ], capture_output=True, text=True, timeout=30)
+    assert process.returncode == 0, process.stderr + process.stdout
+    assert_no_child_progress(process.stdout + process.stderr)
+    if as_json:
+        result = json.loads(process.stdout)
+        assert result["status"] == "succeeded" and result["answer"] == "subagent-complete"
+        assert not result["interrupts"] and process.stderr == ""
+    else:
+        assert process.stderr.count("[Tool] Running delegate_task\n") == 1
+        assert process.stderr.count("[Tool] Completed delegate_task (") == 1
+        assert process.stderr.count("[Model]") == 2
+        assert "subagent-complete" in process.stdout
+    assert (tmp_path / "child-output").read_text() == "done"

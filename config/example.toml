@@ -13,3 +13,19 @@ checkpoint_file = "checkpoints.sqlite3"
 max_model_calls = 10
 bash_timeout_s = 60
 max_tool_output_bytes = 65536
+
+[[subagents]]
+id = "researcher"
+name = "Researcher"
+description = "读取工作区内容、调研需求与现有实现，梳理约束、证据和验收标准，支持持续追问。"
+system_prompt_file = "../prompts/subagents/researcher.md"
+tools = ["read_file", "glob", "read_image", "write_todos"]
+persistence = "per_thread"
+
+[[subagents]]
+id = "engineer"
+name = "Engineer"
+description = "根据明确需求与调研结论在工作区完成具体实现，修改相关文件并验证结果。"
+system_prompt_file = "../prompts/subagents/engineer.md"
+tools = ["read_file", "write_file", "edit_file", "glob", "bash", "read_image", "write_todos"]
+persistence = "per_invocation"

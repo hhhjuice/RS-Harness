@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import stat
 import tempfile
 import tomllib
+import unicodedata
 from pathlib import Path
 from typing import Literal, Self, get_args
 
@@ -64,11 +67,67 @@ class RuntimeConfig(BaseModel):
     max_tool_output_bytes: int = Field(default=65536, gt=0, strict=True)
 
 
+SubagentTool = Literal["read_file", "write_file", "edit_file", "glob", "bash", "read_image", "write_todos"]
+SUBAGENT_TOOLS = get_args(SubagentTool)
+
+
+class SubagentConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    id: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    name: str
+    description: str
+    system_prompt_file: Path
+    tools: tuple[SubagentTool, ...]
+    persistence: Literal["per_invocation", "per_thread"] = "per_invocation"
+
+    @field_validator("name", "description")
+    @classmethod
+    def readable_text(cls, value: str) -> str:
+        if not value.strip() or any(unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"} for char in value):
+            raise ValueError("must be non-empty text without control characters or line breaks")
+        return value.strip()
+
+    @field_validator("system_prompt_file", mode="before")
+    @classmethod
+    def non_blank_path(cls, value):
+        if isinstance(value, str) and not value.strip():
+            raise ValueError("system_prompt_file must be a non-empty path")
+        return value
+
+    @field_validator("tools")
+    @classmethod
+    def unique_tools(cls, value):
+        if len(value) != len(set(value)):
+            raise ValueError("tools must not contain duplicates")
+        return value
+
+
+class ResolvedSubagent(SubagentConfig):
+    system_prompt: str
+
+
+def subagents_digest(subagents: tuple[ResolvedSubagent, ...]) -> str:
+    definitions = [
+        {"id": item.id, "prompt": item.system_prompt, "tools": sorted(item.tools), "persistence": item.persistence}
+        for item in sorted(subagents, key=lambda item: item.id)
+    ]
+    return hashlib.sha256(json.dumps(definitions, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     model: ModelConfig
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
+    subagents: tuple[SubagentConfig, ...] = Field(min_length=1)
+
+    @field_validator("subagents")
+    @classmethod
+    def unique_subagents(cls, value):
+        if len({item.id for item in value}) != len(value):
+            raise ValueError("subagent ids must be unique")
+        return value
 
     @classmethod
     def load(cls, path: str | Path = "config/default.toml") -> Self:
@@ -99,13 +158,29 @@ class Config(BaseModel):
             checkpoint = Path(runtime["sessions_dir"]) / checkpoint
         runtime["checkpoint_file"] = str(checkpoint.resolve())
         raw["runtime"] = runtime
+        for item in raw.get("subagents", []) if isinstance(raw.get("subagents"), list) else []:
+            if isinstance(item, dict) and isinstance(item.get("system_prompt_file"), str) and item["system_prompt_file"].strip():
+                item["system_prompt_file"] = _resolve_path(base_dir, item["system_prompt_file"])
 
         try:
             config = cls.model_validate(raw)
         except Exception as exc:
             raise ConfigError(f"Invalid Config {config_path}: {exc}") from exc
 
+        config.resolve_subagents()
         return config
+
+    def resolve_subagents(self) -> tuple[ResolvedSubagent, ...]:
+        resolved = []
+        for item in self.subagents:
+            try:
+                prompt = item.system_prompt_file.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeError) as exc:
+                raise ConfigError(f"Unable to read subagent prompt for {item.id}") from exc
+            if not prompt:
+                raise ConfigError(f"Subagent prompt must not be empty: {item.id}")
+            resolved.append(ResolvedSubagent(**item.model_dump(), system_prompt=prompt))
+        return tuple(resolved)
 
     def api_key(self) -> str:
         value = self.model.api_key.get_secret_value().strip()
@@ -139,6 +214,7 @@ class Config(BaseModel):
             "max_model_calls": self.runtime.max_model_calls,
             "bash_timeout_s": self.runtime.bash_timeout_s,
             "max_tool_output_bytes": self.runtime.max_tool_output_bytes,
+            "subagents": [item.model_dump(mode="json") for item in self.subagents],
         }
 
 

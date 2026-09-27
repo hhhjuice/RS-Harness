@@ -11,6 +11,8 @@ from rs_harness.config import Config
 def config(tmp_path: Path) -> Config:
     prompt = tmp_path / "system.md"
     prompt.write_text("You are a test assistant. Workspace: {workdir}", encoding="utf-8")
+    worker_prompt = tmp_path / "worker.md"
+    worker_prompt.write_text("Complete the delegated task and report evidence and unfinished work.", encoding="utf-8")
     config_path = tmp_path / "config.toml"
     sessions = tmp_path / "sessions"
     config_path.write_text(
@@ -25,6 +27,13 @@ def config(tmp_path: Path) -> Config:
                 f'system_prompt_file = "{prompt}"',
                 'checkpoint_file = "checkpoints.sqlite3"',
                 "",
+                "[[subagents]]",
+                'id = "worker"',
+                'name = "通用任务助手"',
+                'description = "Complete bounded tasks"',
+                'system_prompt_file = "worker.md"',
+                'tools = ["read_file", "write_file", "edit_file", "glob", "bash", "read_image", "write_todos"]',
+                'persistence = "per_invocation"',
             ]
         ),
         encoding="utf-8",

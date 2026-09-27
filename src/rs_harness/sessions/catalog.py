@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..config import Config
+from ..config import Config, subagents_digest
 
 
 class SessionError(ValueError):
@@ -30,6 +30,7 @@ class SessionMeta(BaseModel):
     status: str = Field(pattern=r"^(running|closed)$")
     workdir: str
     model: str
+    subagents_digest: str
     created_at: str
     updated_at: str
     closed_at: str | None = None
@@ -93,6 +94,7 @@ class Session:
 class SessionCatalog:
     @staticmethod
     def create(config: Config, *, workdir: str | Path | None = None) -> Session:
+        digest = subagents_digest(config.resolve_subagents())
         sessions_dir = config.runtime.sessions_dir
         sessions_dir.mkdir(parents=True, exist_ok=True)
         session_id = uuid4().hex
@@ -106,6 +108,7 @@ class SessionCatalog:
                 status="running",
                 workdir=resolved_workdir,
                 model=config.model.model,
+                subagents_digest=digest,
                 created_at=now,
                 updated_at=now,
             ),

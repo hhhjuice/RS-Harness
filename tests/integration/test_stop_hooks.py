@@ -14,8 +14,8 @@ from tests.models import ScriptedModel
 @pytest.fixture
 def install_stop_hooks(monkeypatch):
     def install(*hooks):
-        def build_with_hooks(config):
-            middleware = build_middleware(config)
+        def build_with_hooks(config, **kwargs):
+            middleware = build_middleware(config, **kwargs)
             middleware[-1] = StopHookMiddleware(hooks)
             return middleware
 

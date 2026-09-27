@@ -8,12 +8,14 @@ from pathlib import Path
 from typing import Literal
 
 from langchain.agents.middleware import AgentMiddleware, HumanInTheLoopMiddleware, ModelCallLimitMiddleware, TodoListMiddleware, ToolErrorMiddleware, hook_config
+from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
 from langchain_core.callbacks.manager import adispatch_custom_event
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.runnables.config import ensure_config
 from langchain_core.tools import ToolException
+from openai import APIConnectionError, APITimeoutError, RateLimitError
 
-from ..config import Config
+from ..config import Config, ResolvedSubagent, SUBAGENT_TOOLS
 from ..inputs import InputError, validate_image_messages
 from ..tools.filesystem import resolve_file_path
 
@@ -53,15 +55,22 @@ def _approval_description(tool_call, state, runtime) -> str:
 
 
 class ToolDenyMiddleware(AgentMiddleware):
+    def __init__(self, *, allow_approval: bool = True):
+        self.allow_approval = allow_approval
+
     async def awrap_tool_call(self, request, handler):
-        if request.tool_call.get("name") == "bash":
-            decision, reason = classify_tool_call(request.tool_call, request.runtime.context.workdir)
-            if decision == "deny":
-                await _notify_middleware(self.name, "blocked", f"{request.tool_call['name']}: {reason}")
-                return ToolMessage(
-                    content=reason, status="error", name=request.tool_call["name"],
-                    tool_call_id=request.tool_call["id"],
-                )
+        name = request.tool_call.get("name")
+        if name != "bash" and (self.allow_approval or name not in {"read_file", "write_file", "edit_file", "read_image"}):
+            return await handler(request)
+        decision, reason = classify_tool_call(request.tool_call, request.runtime.context.workdir)
+        if decision == "deny" or (decision == "ask" and not self.allow_approval):
+            if decision == "ask":
+                reason = f"Permission denied: subagents cannot request human approval. {reason}"
+            await _notify_middleware(self.name, "blocked", f"{request.tool_call['name']}: {reason}")
+            return ToolMessage(
+                content=reason, status="error", name=request.tool_call["name"],
+                tool_call_id=request.tool_call["id"],
+            )
         return await handler(request)
 
 
@@ -69,6 +78,49 @@ def _tool_error(error: Exception, request) -> str | None:
     if isinstance(error, ToolException):
         return str(error)
     return None
+
+
+def _delegate_error(error: Exception, request, subagents: Sequence[ResolvedSubagent]) -> str | None:
+    if request.tool_call["name"] != "delegate_task":
+        return _tool_error(error, request)
+    if isinstance(error, ToolException):
+        return str(error)
+    category = next((label for kind, label in (
+        (ModelCallLimitExceededError, "subagent_budget_exhausted"),
+        (APITimeoutError, "subagent_model_timeout"),
+        (APIConnectionError, "subagent_model_connection_error"),
+        (RateLimitError, "subagent_model_rate_limit"),
+    ) if isinstance(error, kind)), None)
+    if category is None:
+        return None
+    agent_id = request.tool_call["args"].get("agent_id")
+    definition = next(item for item in subagents if item.id == agent_id)
+    return (
+        f"{category}: {definition.name} ({definition.id}) did not finish. "
+        "Earlier tools may already have changed files. Inspect existing artifacts before deciding "
+        "whether to narrow the task, ask this agent again, delegate elsewhere, or report unfinished work."
+    )
+
+
+class SubagentBatchMiddleware(AgentMiddleware):
+    """Allow one call per persistent identity in the current AIMessage batch."""
+
+    def __init__(self, subagents: Sequence[ResolvedSubagent]):
+        self.persistent_ids = {item.id for item in subagents if item.persistence == "per_thread"}
+
+    async def awrap_tool_call(self, request, handler):
+        call = request.tool_call
+        agent_id = call["args"].get("agent_id")
+        if call["name"] == "delegate_task" and isinstance(agent_id, str) and agent_id in self.persistent_ids:
+            message = next(message for message in reversed(request.state["messages"]) if isinstance(message, AIMessage))
+            first = next(item for item in message.tool_calls
+                         if item["name"] == "delegate_task" and item["args"].get("agent_id") == agent_id)
+            if first["id"] != call["id"]:
+                raise ToolException(
+                    f"duplicate_persistent_subagent: {agent_id} already has a call in this batch. "
+                    "Wait for its result, then ask again in the next model turn. This duplicate was not executed."
+                )
+        return await handler(request)
 
 
 def _project_image_tool_results(messages: list[BaseMessage]) -> list[BaseMessage]:
@@ -144,11 +196,15 @@ class StopHookMiddleware(AgentMiddleware):
         return None
 
 
-def build_middleware(config: Config) -> list[AgentMiddleware]:
+def build_middleware(
+    config: Config, *, tools: Sequence[str] = SUBAGENT_TOOLS,
+    subagents: Sequence[ResolvedSubagent] = (),
+    allow_approval: bool = True,
+) -> list[AgentMiddleware]:
     """Build fresh middleware instances for one Agent graph."""
 
     return [
-        HumanInTheLoopMiddleware(interrupt_on={
+        *([HumanInTheLoopMiddleware(interrupt_on={
             **{
                 name: {
                     "allowed_decisions": ["approve", "reject"],
@@ -156,16 +212,17 @@ def build_middleware(config: Config) -> list[AgentMiddleware]:
                     "description": _approval_description,
                 }
                 for name in ("read_file", "write_file", "edit_file", "read_image", "bash")
+                if name in tools
             },
-            "glob": False,
-        }),
+        })] if allow_approval else []),
         ModelCallLimitMiddleware(
             run_limit=config.runtime.max_model_calls,
             exit_behavior="error",
         ),
-        ToolDenyMiddleware(),
-        ToolErrorMiddleware(on_error=_tool_error),
+        ToolDenyMiddleware(allow_approval=allow_approval),
+        ToolErrorMiddleware(on_error=(lambda error, request: _delegate_error(error, request, subagents)) if subagents else _tool_error),
+        *([SubagentBatchMiddleware(subagents)] if subagents else []),
         ImageInputMiddleware(config),
-        TodoListMiddleware(),
+        *([TodoListMiddleware()] if "write_todos" in tools else []),
         StopHookMiddleware(),
     ]

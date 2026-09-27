@@ -365,8 +365,8 @@ def test_production_agent_factory_wires_middleware_and_context(config, monkeypat
     assert result is not None
     assert captured["context_schema"] is AgentContext
     assert captured["checkpointer"] == "checkpoint"
-    assert {tool.name for tool in captured["tools"]} == {"read_file", "write_file", "edit_file", "glob", "bash", "read_image"}
-    assert len(captured["middleware"]) == 7
+    assert {tool.name for tool in captured["tools"]} == {"read_file", "write_file", "edit_file", "glob", "bash", "read_image", "delegate_task"}
+    assert len(captured["middleware"]) == 8
     assert isinstance(captured["middleware"][0], HumanInTheLoopMiddleware)
     assert isinstance(captured["middleware"][1], ModelCallLimitMiddleware)
     assert captured["middleware"][1].run_limit == config.runtime.max_model_calls
@@ -431,7 +431,7 @@ async def test_application_passes_session_workdir_as_runtime_context(config, mon
     workdir.mkdir()
     capture = ApplicationContextCapture()
 
-    def fake_build_agent(config, *, workdir, checkpointer=None, model=None):
+    def fake_build_agent(config, *, workdir, checkpointer=None, model=None, subagents=None):
         return create_agent(
             model=model,
             tools=[],
@@ -472,7 +472,7 @@ async def test_application_records_budget_failure_and_allows_next_interaction(co
         ]
     )
 
-    def fake_build_agent(config, *, workdir, checkpointer=None, model=None):
+    def fake_build_agent(config, *, workdir, checkpointer=None, model=None, subagents=None):
         return _agent(
             model,
             middleware=build_middleware(config),
@@ -488,7 +488,7 @@ async def test_application_records_budget_failure_and_allows_next_interaction(co
     assert failed.answer is None
     assert failed.error["type"] == "ModelCallLimitExceededError"
     events = [json.loads(line) for line in session.trajectory_path.read_text().splitlines()]
-    assert [event["event"] for event in events] == [
+    assert [event["event"] for event in events if not event["event"].startswith("chain_")] == [
         "user_input", "model_start", "model_end", "tool_start", "tool_end", "interaction_failed",
     ]
     assert model.call_count == 1
@@ -513,7 +513,7 @@ def test_cli_budget_failure_and_next_interaction(config, monkeypatch, tmp_path, 
     ])
     session = create_session(config)
 
-    def build_test_agent(loaded_config, *, workdir, checkpointer=None, model=None):
+    def build_test_agent(loaded_config, *, workdir, checkpointer=None, model=None, subagents=None):
         return _agent(model, middleware=build_middleware(loaded_config), checkpointer=checkpointer)
 
     async def ask_with_model(loaded_config, session_id, text, **kwargs):
@@ -543,7 +543,7 @@ def test_cli_budget_failure_and_next_interaction(config, monkeypatch, tmp_path, 
         assert json.loads(recovered.stdout)["answer"] == "recovered"
 
     events = [json.loads(line) for line in session.trajectory_path.read_text().splitlines()]
-    assert [event["event"] for event in events] == [
+    assert [event["event"] for event in events if not event["event"].startswith("chain_")] == [
         "user_input", "model_start", "model_end", "tool_start", "tool_end", "interaction_failed",
         "user_input", "model_start", "model_end", "interaction_succeeded",
     ]
