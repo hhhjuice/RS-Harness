@@ -80,7 +80,7 @@ def _arguments(inputs: Any) -> str:
             summary[key] = "[redacted]"
         elif key in {"content", "old_text", "new_text"} and isinstance(value, str):
             summary[key] = f"<{len(value)} chars>"
-        elif key in {"path", "pattern", "command", "offset", "limit"}:
+        elif key in {"name", "path", "pattern", "command", "offset", "limit"}:
             if key == "command" and isinstance(value, str):
                 value = _redact_command(value)
             summary[key] = value

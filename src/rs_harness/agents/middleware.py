@@ -17,7 +17,9 @@ from openai import APIConnectionError, APITimeoutError, RateLimitError
 
 from ..config import Config, ResolvedSubagent, SUBAGENT_TOOLS
 from ..inputs import InputError, validate_image_messages
+from ..skills import SkillLoader
 from ..tools.filesystem import resolve_file_path
+from .skills import SkillMiddleware
 
 
 def classify_tool_call(tool_call: dict, workdir: str) -> tuple[Literal["deny", "ask", "allow"], str]:
@@ -199,6 +201,7 @@ class StopHookMiddleware(AgentMiddleware):
 def build_middleware(
     config: Config, *, tools: Sequence[str] = SUBAGENT_TOOLS,
     subagents: Sequence[ResolvedSubagent] = (),
+    skills: SkillLoader | None = None,
     allow_approval: bool = True,
 ) -> list[AgentMiddleware]:
     """Build fresh middleware instances for one Agent graph."""
@@ -224,5 +227,6 @@ def build_middleware(
         *([SubagentBatchMiddleware(subagents)] if subagents else []),
         ImageInputMiddleware(config),
         *([TodoListMiddleware()] if "write_todos" in tools else []),
+        *([SkillMiddleware(skills)] if "load_skill" in tools and skills is not None else []),
         StopHookMiddleware(),
     ]

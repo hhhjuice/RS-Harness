@@ -11,12 +11,13 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 
 from ..config import Config, ResolvedSubagent
 from ..context import AgentContext
+from ..skills import SkillLoader
 from .middleware import build_middleware
 
 
 def build_delegate_tool(
     config: Config, *, model: Any, tools: Sequence[BaseTool], workdir: str,
-    subagents: Sequence[ResolvedSubagent],
+    subagents: Sequence[ResolvedSubagent], skills: SkillLoader,
 ) -> BaseTool:
     from langchain.agents import create_agent
 
@@ -26,7 +27,7 @@ def build_delegate_tool(
     for definition in subagents:
         graph = create_agent(
             model=model,
-            tools=[available[name] for name in definition.tools if name != "write_todos"],
+            tools=[available[name] for name in definition.tools if name not in {"write_todos", "load_skill"}],
             system_prompt=(
                 definition.system_prompt.replace("{workdir}", workdir)
                 + f"\n\nIdentity: {definition.name} ({definition.id}). Workspace: {workdir}.\n"
@@ -38,7 +39,7 @@ def build_delegate_tool(
                 "through another tool; report the limitation to the main agent. "
                 "Only your final response is returned to the parent."
             ),
-            middleware=build_middleware(config, tools=definition.tools, allow_approval=False),
+            middleware=build_middleware(config, tools=definition.tools, skills=skills, allow_approval=False),
             context_schema=AgentContext,
             checkpointer=True if definition.persistence == "per_thread" else None,
             name=f"rsh_{definition.id}",

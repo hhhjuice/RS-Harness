@@ -25,6 +25,7 @@ def config(tmp_path: Path) -> Config:
                 "[runtime]",
                 f'sessions_dir = "{sessions}"',
                 f'system_prompt_file = "{prompt}"',
+                'skills_dir = "skills"',
                 'checkpoint_file = "checkpoints.sqlite3"',
                 "",
                 "[[subagents]]",
@@ -32,10 +33,32 @@ def config(tmp_path: Path) -> Config:
                 'name = "通用任务助手"',
                 'description = "Complete bounded tasks"',
                 'system_prompt_file = "worker.md"',
-                'tools = ["read_file", "write_file", "edit_file", "glob", "bash", "read_image", "write_todos"]',
+                'tools = ["read_file", "write_file", "edit_file", "glob", "bash", "read_image", "write_todos", "load_skill"]',
                 'persistence = "per_invocation"',
             ]
         ),
         encoding="utf-8",
     )
     return Config.load(config_path)
+
+
+@pytest.fixture
+def skills_config(config):
+    source = Path(__file__).resolve().parents[1] / ".agents/skills/find-skills/SKILL.md"
+    target = config.runtime.skills_dir / "find-skills/SKILL.md"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(source.read_bytes())
+    return config
+
+
+@pytest.fixture
+def resources_config_path(tmp_path):
+    repository = Path(__file__).resolve().parents[1]
+    paths = [".agents/example.toml", ".agents/prompts/system.md",
+             ".agents/prompts/subagents/researcher.md", ".agents/prompts/subagents/engineer.md",
+             ".agents/skills/find-skills/SKILL.md", ".agents/skills/pdf/SKILL.md"]
+    for relative in paths:
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((repository / relative).read_bytes())
+    return tmp_path / ".agents/example.toml"

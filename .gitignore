@@ -5,8 +5,9 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .env
-/config/default.toml
-/sessions/
+/.agents/config.toml
+/.agents/sessions/
+/.agents/skills/
 /workdir/
 *.egg-info/
 *.py[cod]

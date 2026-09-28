@@ -13,9 +13,9 @@ from rs_harness.config import Config, ConfigError
 
 @pytest.mark.live
 def test_real_model_interactive_multiturn(tmp_path, monkeypatch):
-    if not Path("config/default.toml").is_file():
-        pytest.skip("Create config/default.toml from config/example.toml to run live tests")
-    config = Config.load("config/default.toml")
+    if not Path(".agents/config.toml").is_file():
+        pytest.skip("Create .agents/config.toml from .agents/example.toml to run live tests")
+    config = Config.load()
     try:
         config.api_key()
     except ConfigError as exc:
@@ -31,7 +31,7 @@ def test_real_model_interactive_multiturn(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_load", lambda path: config)
     result = CliRunner().invoke(
         cli.app,
-        ["--config", "config/default.toml", "--session-id", session.session_id],
+        ["--session-id", session.session_id],
         input=(
             "Remember the code RSH-49261. Reply with exactly: ok\n"
             "What code did I ask you to remember? Reply only with the code.\n"

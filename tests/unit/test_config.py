@@ -1,8 +1,9 @@
 import os
 
 import pytest
+import tomlkit
 
-from rs_harness.config import Config, ConfigError, ModelConfig, REASONING_EFFORTS, save_reasoning_effort
+from rs_harness.config import Config, ConfigError, ModelConfig, REASONING_EFFORTS, RuntimeConfig, save_reasoning_effort
 
 
 def test_config_resolves_paths_and_prompt(config):
@@ -15,6 +16,41 @@ def test_config_resolves_paths_and_prompt(config):
     assert config.summary()["max_tool_output_bytes"] == 65536
     assert config.model.reasoning_effort is None
     assert config.summary()["reasoning_effort"] is None
+
+
+@pytest.mark.parametrize("use_defaults", [True, False])
+def test_resource_paths_resolve_from_config_directory(resources_config_path, tmp_path, monkeypatch, use_defaults):
+    document = tomlkit.parse(resources_config_path.read_text())
+    suffixes = {"sessions_dir": "sessions", "system_prompt_file": "prompts/system.md", "skills_dir": "skills"}
+    if use_defaults:
+        for field in suffixes:
+            del document["runtime"][field]
+        resources = tmp_path / ".agents"
+        defaults = RuntimeConfig()
+        for field, suffix in suffixes.items():
+            assert str(getattr(defaults, field)) == f"../.agents/{suffix}"
+    else:
+        resources = tmp_path / "custom"
+        for field, suffix in suffixes.items():
+            document["runtime"][field] = f"../custom/{suffix}"
+        prompt = resources / "prompts/system.md"
+        prompt.parent.mkdir(parents=True)
+        prompt.write_bytes((tmp_path / ".agents/prompts/system.md").read_bytes())
+        document["runtime"]["checkpoint_file"] = str(tmp_path / "custom-database/state.sqlite3")
+    resources_config_path.write_text(tomlkit.dumps(document))
+    other = tmp_path / "different-cwd"
+    other.mkdir()
+    monkeypatch.chdir(other)
+
+    loaded = Config.load(resources_config_path)
+    for field, suffix in suffixes.items():
+        assert getattr(loaded.runtime, field) == resources / suffix
+        assert loaded.summary()[field] == str(resources / suffix)
+    expected_checkpoint = resources / "sessions/checkpoints.sqlite3" if use_defaults else tmp_path / "custom-database/state.sqlite3"
+    assert loaded.runtime.checkpoint_file == expected_checkpoint
+    assert "task-workspace" in loaded.system_prompt("task-workspace")
+    assert all(item.system_prompt and item.system_prompt_file.is_relative_to(tmp_path / ".agents/prompts")
+               for item in loaded.resolve_subagents())
 
 
 @pytest.mark.parametrize("effort", REASONING_EFFORTS)

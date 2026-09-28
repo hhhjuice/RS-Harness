@@ -13,9 +13,9 @@ pytestmark = pytest.mark.live
 
 @pytest.fixture
 def live_config_path():
-    path = Path("config/default.toml").resolve()
+    path = Path(".agents/config.toml").resolve()
     if not path.is_file():
-        pytest.skip("Configure config/default.toml to run real-model tests")
+        pytest.skip("Configure .agents/config.toml to run real-model tests")
     try:
         Config.load(path).api_key()
     except ConfigError as exc:

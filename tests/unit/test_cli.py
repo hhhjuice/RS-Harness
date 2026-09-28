@@ -12,6 +12,52 @@ from rs_harness.sessions.catalog import SessionCatalog
 from tests.images import write_test_image
 
 
+@pytest.fixture
+def default_config(resources_config_path, tmp_path, monkeypatch):
+    path = tmp_path / ".agents/config.toml"
+    path.write_bytes(resources_config_path.read_bytes())
+    monkeypatch.chdir(tmp_path)
+    return Config.load(path)
+
+
+def test_default_config_python_and_session_commands(default_config):
+    assert Config.load().summary() == default_config.summary()
+    runner = CliRunner()
+    created = runner.invoke(app, ["create-session", "--json"])
+    assert created.exit_code == 0, created.output
+    payload = json.loads(created.stdout)
+    assert Path(payload["session_path"]).parent == default_config.runtime.sessions_dir
+    listed = runner.invoke(app, ["list-session", "--json"])
+    assert listed.exit_code == 0, listed.output
+    assert [item["session_id"] for item in json.loads(listed.stdout)] == [payload["session_id"]]
+    closed = runner.invoke(app, ["close-session", "--session-id", payload["session_id"], "--json"])
+    assert closed.exit_code == 0, closed.output
+    assert SessionCatalog.open(default_config, payload["session_id"]).meta.status == "closed"
+
+
+@pytest.mark.parametrize("interactive", [False, True])
+def test_default_config_ask_and_interactive(default_config, monkeypatch, interactive):
+    from langchain_core.messages import AIMessage
+    from rs_harness import application, cli
+    from tests.models import ScriptedModel
+
+    model = ScriptedModel([AIMessage(content="default-entry-ok")])
+
+    async def ask_with_model(config, session_id, message, **kwargs):
+        assert config.summary() == default_config.summary()
+        return await application.ask(config, session_id, message, model=model, **kwargs)
+
+    monkeypatch.setattr(cli, "ask", ask_with_model)
+    if interactive:
+        result = CliRunner().invoke(app, [], input="hello\n/quit\n")
+    else:
+        result = CliRunner().invoke(app, ["ask", "hello", "--json"])
+    assert result.exit_code == 0, result.output
+    assert "default-entry-ok" in result.stdout
+    assert len(SessionCatalog.list(default_config)) == 1
+    assert default_config.runtime.checkpoint_file.is_file()
+
+
 def test_create_and_list_session(config, tmp_path):
     runner = CliRunner()
     config_path = tmp_path / "config.toml"
@@ -41,6 +87,126 @@ def test_help_shows_reasoning_options(tmp_path, config):
 
     assert result.exit_code == 0, result.output
     assert "/reasoning [none|minimal|low|medium|high|xhigh|max|default]" in result.output
+    assert "/skill      show installed skills" in result.output
+
+
+@pytest.fixture
+def skill_runner(monkeypatch):
+    from rs_harness import cli
+
+    async def unexpected_ask(*args, **kwargs):
+        raise AssertionError("/skill must not send a request to the model")
+
+    monkeypatch.setattr(cli, "ask", unexpected_ask)
+    return CliRunner()
+
+
+def test_skill_command_lists_installed_metadata(default_config, skill_runner):
+    result = skill_runner.invoke(app, [], input="/skill\n/quit\n")
+    assert result.exit_code == 0, result.output
+    assert f"Skills directory: {default_config.runtime.skills_dir}" in result.stdout
+    assert "Installed skills (2):" in result.stdout
+    assert "- find-skills:" in result.stdout and "- pdf:" in result.stdout
+    assert "Helps users discover and install agent skills" in result.stdout
+    assert "## What is the Skills CLI?" not in result.stdout
+    assert not default_config.runtime.sessions_dir.exists()
+
+
+@pytest.mark.parametrize("exists", [False, True])
+def test_skill_command_empty_or_missing_directory(config, tmp_path, skill_runner, exists):
+    if exists:
+        config.runtime.skills_dir.mkdir()
+    result = skill_runner.invoke(app, ["--config", str(tmp_path / "config.toml")], input="/skill\n/quit\n")
+    assert result.exit_code == 0, result.output
+    assert "No skills installed." in result.stdout
+    assert not config.runtime.sessions_dir.exists()
+
+
+@pytest.mark.parametrize("invalid", ["root_file", "duplicate"])
+def test_skill_command_scan_error_keeps_interactive_loop(config, tmp_path, skill_runner, invalid):
+    if invalid == "root_file":
+        config.runtime.skills_dir.write_text("not a directory")
+        expected = "Unable to read skills directory"
+    else:
+        for name in ("one", "two"):
+            path = config.runtime.skills_dir / name / "SKILL.md"
+            path.parent.mkdir(parents=True)
+            path.write_text("---\nname: same\ndescription: Description\n---\nPRIVATE-BODY")
+        expected = "Duplicate skill"
+    result = skill_runner.invoke(app, ["--config", str(tmp_path / "config.toml")], input="/skill\n/help\n/quit\n")
+    assert result.exit_code == 0, result.output
+    assert expected in result.stderr
+    assert "/skill      show installed skills" in result.stdout
+    assert "PRIVATE-BODY" not in result.output
+    assert not config.runtime.sessions_dir.exists()
+
+
+@pytest.mark.parametrize("command", ["/skill find-skills", "/skill --refresh"])
+def test_skill_command_rejects_arguments(config, tmp_path, skill_runner, command):
+    result = skill_runner.invoke(app, ["--config", str(tmp_path / "config.toml")], input=f"{command}\n/quit\n")
+    assert result.exit_code == 0, result.output
+    assert "Usage: /skill" in result.stderr
+    assert not config.runtime.sessions_dir.exists()
+
+
+def test_skill_command_rescans_when_called_again(config, tmp_path, monkeypatch, skill_runner):
+    from rs_harness import cli
+
+    first = config.runtime.skills_dir / "alpha/SKILL.md"
+    first.parent.mkdir(parents=True)
+    first.write_text("# Alpha description\nPRIVATE-ALPHA")
+
+    def commands():
+        yield "/skill"
+        second = config.runtime.skills_dir / "beta/SKILL.md"
+        second.parent.mkdir()
+        second.write_text("# Beta description\nPRIVATE-BETA")
+        yield "/skill"
+        yield "/quit"
+
+    inputs = commands()
+    monkeypatch.setattr(cli.typer, "prompt", lambda *args, **kwargs: next(inputs))
+    result = skill_runner.invoke(app, ["--config", str(tmp_path / "config.toml")])
+    assert result.exit_code == 0, result.output
+    assert "Installed skills (1):" in result.stdout and "Installed skills (2):" in result.stdout
+    assert result.stdout.count("- alpha: Alpha description") == 2
+    assert result.stdout.count("- beta: Beta description") == 1
+    assert "PRIVATE-" not in result.stdout
+    assert not config.runtime.sessions_dir.exists()
+
+
+def test_list_skill_matches_interactive_catalog(default_config, skill_runner):
+    listed = skill_runner.invoke(app, ["list-skill"])
+    interactive = skill_runner.invoke(app, [], input="/skill\n/quit\n")
+    assert listed.exit_code == 0, listed.output
+    assert listed.stdout.strip() in interactive.stdout
+    assert "Installed skills (2):" in listed.stdout
+    assert "- find-skills:" in listed.stdout and "- pdf:" in listed.stdout
+    assert "## What is the Skills CLI?" not in listed.stdout
+    assert not default_config.runtime.sessions_dir.exists()
+    assert "list-skill" in skill_runner.invoke(app, ["--help"]).stdout
+
+
+@pytest.mark.parametrize("placement", ["root", "child", "override"])
+def test_list_skill_uses_explicit_config(config, tmp_path, monkeypatch, skill_runner, placement):
+    monkeypatch.chdir(tmp_path)
+    options = ["--config", str(tmp_path / "config.toml")]
+    arguments = [*options, "list-skill"] if placement == "root" else ["list-skill", *options]
+    if placement == "override":
+        arguments = ["--config", str(tmp_path / "missing.toml"), "list-skill", *options]
+    result = skill_runner.invoke(app, arguments)
+    assert result.exit_code == 0, result.output
+    assert f"Skills directory: {config.runtime.skills_dir}" in result.stdout
+    assert "No skills installed." in result.stdout
+    assert not config.runtime.sessions_dir.exists()
+
+
+def test_list_skill_errors_without_session(config, tmp_path, skill_runner):
+    config.runtime.skills_dir.write_text("not a directory")
+    result = skill_runner.invoke(app, ["list-skill", "--config", str(tmp_path / "config.toml")])
+    assert result.exit_code == 1, result.output
+    assert "Unable to read skills directory" in result.stderr
+    assert not config.runtime.sessions_dir.exists()
 
 
 def test_reasoning_command_persists_and_resets_without_a_session(config, tmp_path):
@@ -170,7 +336,7 @@ def test_explicit_child_default_config_overrides_root_config(config, tmp_path, m
 
     root_config = tmp_path / "custom.toml"
     root_config.write_text("", encoding="utf-8")
-    child_config = tmp_path / "config" / "default.toml"
+    child_config = tmp_path / ".agents" / "config.toml"
     child_config.parent.mkdir()
     child_config.write_text("", encoding="utf-8")
     loaded = []
@@ -187,11 +353,11 @@ def test_explicit_child_default_config_overrides_root_config(config, tmp_path, m
     monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(app, [
         "--config", str(root_config), "create-session",
-        "--config", "config/default.toml", "--json",
+        "--config", ".agents/config.toml", "--json",
     ])
 
     assert result.exit_code == 0, result.output
-    assert loaded == [Path("config/default.toml")]
+    assert loaded == [Path(".agents/config.toml")]
 
 
 def test_invalid_image_json_creates_no_session(config, tmp_path):

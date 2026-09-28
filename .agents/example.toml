@@ -7,10 +7,11 @@ max_tokens = 4096
 # reasoning_effort = "high" # none|minimal|low|medium|high|xhigh|max
 
 [runtime]
-sessions_dir = "../sessions"
-system_prompt_file = "../prompts/system.md"
+sessions_dir = "../.agents/sessions"
+system_prompt_file = "../.agents/prompts/system.md"
+skills_dir = "../.agents/skills"
 checkpoint_file = "checkpoints.sqlite3"
-max_model_calls = 10
+max_model_calls = 50
 bash_timeout_s = 60
 max_tool_output_bytes = 65536
 
@@ -18,14 +19,14 @@ max_tool_output_bytes = 65536
 id = "researcher"
 name = "Researcher"
 description = "读取工作区内容、调研需求与现有实现，梳理约束、证据和验收标准，支持持续追问。"
-system_prompt_file = "../prompts/subagents/researcher.md"
-tools = ["read_file", "glob", "read_image", "write_todos"]
+system_prompt_file = "../.agents/prompts/subagents/researcher.md"
+tools = ["read_file", "glob", "read_image", "write_todos", "load_skill"]
 persistence = "per_thread"
 
 [[subagents]]
 id = "engineer"
 name = "Engineer"
 description = "根据明确需求与调研结论在工作区完成具体实现，修改相关文件并验证结果。"
-system_prompt_file = "../prompts/subagents/engineer.md"
-tools = ["read_file", "write_file", "edit_file", "glob", "bash", "read_image", "write_todos"]
+system_prompt_file = "../.agents/prompts/subagents/engineer.md"
+tools = ["read_file", "write_file", "edit_file", "glob", "bash", "read_image", "write_todos", "load_skill"]
 persistence = "per_invocation"

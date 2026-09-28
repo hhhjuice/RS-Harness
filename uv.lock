@@ -1048,7 +1048,7 @@ wheels = [
 
 [[package]]
 name = "rs-harness"
-version = "0.0.6"
+version = "0.0.7"
 source = { editable = "." }
 dependencies = [
     { name = "langchain" },
@@ -1057,6 +1057,7 @@ dependencies = [
     { name = "langgraph-checkpoint-sqlite" },
     { name = "prompt-toolkit" },
     { name = "pydantic" },
+    { name = "pyyaml" },
     { name = "tomlkit" },
     { name = "typer" },
 ]
@@ -1075,6 +1076,7 @@ requires-dist = [
     { name = "langgraph-checkpoint-sqlite", specifier = ">=2.0,<4" },
     { name = "prompt-toolkit", specifier = ">=3.0.52,<4" },
     { name = "pydantic", specifier = ">=2.7,<3" },
+    { name = "pyyaml", specifier = ">=6,<7" },
     { name = "tomlkit", specifier = ">=0.13,<1" },
     { name = "typer", specifier = ">=0.12,<1" },
 ]

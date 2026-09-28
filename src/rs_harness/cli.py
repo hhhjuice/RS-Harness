@@ -22,6 +22,7 @@ from .config import REASONING_EFFORTS, Config, ConfigError, save_reasoning_effor
 from .inputs import InputError, build_human_message
 from .progress import CliProgress
 from .sessions.catalog import SessionBusy, SessionCatalog, SessionError
+from .skills import SkillLoader
 
 app = typer.Typer(add_completion=False, no_args_is_help=False)
 
@@ -34,6 +35,12 @@ REASONING_USAGE = "/reasoning [none|minimal|low|medium|high|xhigh|max|default]"
 
 def _load(path: Path) -> Config:
     return Config.load(path)
+
+
+def _print_skills(config: Config) -> None:
+    skills = SkillLoader(config.runtime.skills_dir)
+    typer.echo(f"Skills directory: {config.runtime.skills_dir}")
+    typer.echo(f"Installed skills ({len(skills.skills)}):\n{skills.catalog()}" if skills.skills else "No skills installed.")
 
 
 def _print_result(result: InteractionResult, as_json: bool, progress: CliProgress | None = None) -> None:
@@ -90,7 +97,7 @@ def _print_error(error: Exception, as_json: bool, *, code: str | None = None) ->
         typer.echo(f"Error: {error}", err=True)
 
 
-DEFAULT_CONFIG = Path("config/default.toml")
+DEFAULT_CONFIG = Path(".agents/config.toml")
 
 
 def _root_option(ctx: typer.Context, name: str, value):
@@ -209,6 +216,19 @@ def close_session_command(
     typer.echo(json.dumps(payload, ensure_ascii=False, indent=2) if as_json else session.session_id)
 
 
+@app.command("list-skill")
+def list_skill_command(
+    ctx: typer.Context,
+    config: Annotated[Path, typer.Option("--config", dir_okay=False)] = DEFAULT_CONFIG,
+) -> None:
+    """List installed skills from the configured skills directory."""
+    try:
+        _print_skills(_load(_root_option(ctx, "config", config)))
+    except ConfigError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
 async def _interactive(config_path: Path, *, session_id: str | None, workdir: Path | None) -> None:
     try:
         config_path = config_path.expanduser().resolve()
@@ -265,12 +285,22 @@ async def _interactive(config_path: Path, *, session_id: str | None, workdir: Pa
         if command == "/help":
             typer.echo(
                 "/status     show session status\n"
+                "/skill      show installed skills\n"
                 "/reasoning  show or set reasoning effort\n"
                 f"            {REASONING_USAGE}\n"
                 "/close      close session\n"
                 "/quit       leave session running\n"
                 "/exit       leave session running"
             )
+            continue
+        if command.split(maxsplit=1)[0] == "/skill":
+            if command != "/skill":
+                typer.echo("Usage: /skill", err=True)
+                continue
+            try:
+                _print_skills(config)
+            except ConfigError as exc:
+                typer.echo(f"Error: {exc}", err=True)
             continue
         if command.split(maxsplit=1)[0] == "/reasoning":
             parts = command.split()

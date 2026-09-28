@@ -96,7 +96,7 @@ async def test_delegation_executes_tools_and_preserves_context_boundary(config, 
     assert tool_messages(parent.inputs[1])[0].tool_call_id == "delegate"
     assert not any(message.tool_call_id == "child-read" for message in tool_messages(parent.inputs[1]))
     assert {tool.name for tool in parent.bound_tools} == {tool.name for tool in worker.bound_tools} | {"delegate_task"}
-    assert len(parent.bound_tools) == 8 and len(worker.bound_tools) == 7
+    assert len(parent.bound_tools) == 9 and len(worker.bound_tools) == 8
 
 
 @pytest.mark.parametrize("content", ["", "x" * 70000, [{"type": "text", "text": "native block"}]])

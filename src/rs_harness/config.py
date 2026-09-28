@@ -59,15 +59,16 @@ class ModelConfig(BaseModel):
 class RuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    sessions_dir: Path = Path("sessions")
-    system_prompt_file: Path = Path("prompts/system.md")
+    sessions_dir: Path = Path("../.agents/sessions")
+    system_prompt_file: Path = Path("../.agents/prompts/system.md")
+    skills_dir: Path = Path("../.agents/skills")
     checkpoint_file: Path = Path("checkpoints.sqlite3")
     max_model_calls: int = Field(default=10, gt=0, strict=True)
     bash_timeout_s: float = Field(default=60, gt=0, strict=True, allow_inf_nan=False)
     max_tool_output_bytes: int = Field(default=65536, gt=0, strict=True)
 
 
-SubagentTool = Literal["read_file", "write_file", "edit_file", "glob", "bash", "read_image", "write_todos"]
+SubagentTool = Literal["read_file", "write_file", "edit_file", "glob", "bash", "read_image", "write_todos", "load_skill"]
 SUBAGENT_TOOLS = get_args(SubagentTool)
 
 
@@ -130,7 +131,7 @@ class Config(BaseModel):
         return value
 
     @classmethod
-    def load(cls, path: str | Path = "config/default.toml") -> Self:
+    def load(cls, path: str | Path = ".agents/config.toml") -> Self:
         config_path = Path(path).expanduser().resolve()
         try:
             with config_path.open("rb") as handle:
@@ -143,8 +144,9 @@ class Config(BaseModel):
         runtime = dict(raw.get("runtime") or {})
         base_dir = config_path.parent
         for key, default in (
-            ("sessions_dir", "sessions"),
-            ("system_prompt_file", "prompts/system.md"),
+            ("sessions_dir", "../.agents/sessions"),
+            ("system_prompt_file", "../.agents/prompts/system.md"),
+            ("skills_dir", "../.agents/skills"),
             ("checkpoint_file", "checkpoints.sqlite3"),
         ):
             value = runtime.setdefault(key, default)
@@ -153,6 +155,7 @@ class Config(BaseModel):
 
         runtime["sessions_dir"] = _resolve_path(base_dir, runtime["sessions_dir"])
         runtime["system_prompt_file"] = _resolve_path(base_dir, runtime["system_prompt_file"])
+        runtime["skills_dir"] = _resolve_path(base_dir, runtime["skills_dir"])
         checkpoint = Path(runtime["checkpoint_file"]).expanduser()
         if not checkpoint.is_absolute():
             checkpoint = Path(runtime["sessions_dir"]) / checkpoint
@@ -211,6 +214,7 @@ class Config(BaseModel):
             "sessions_dir": str(self.runtime.sessions_dir),
             "checkpoint_file": str(self.runtime.checkpoint_file),
             "system_prompt_file": str(self.runtime.system_prompt_file),
+            "skills_dir": str(self.runtime.skills_dir),
             "max_model_calls": self.runtime.max_model_calls,
             "bash_timeout_s": self.runtime.bash_timeout_s,
             "max_tool_output_bytes": self.runtime.max_tool_output_bytes,
