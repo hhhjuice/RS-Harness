@@ -209,6 +209,117 @@ def test_list_skill_errors_without_session(config, tmp_path, skill_runner):
     assert not config.runtime.sessions_dir.exists()
 
 
+@pytest.mark.parametrize("description,summary", [
+    ("Search docs\n\nwith keywords", "Search docs with keywords"),
+    ("文" * 130, "文" * 117 + "..."),
+    ("", ""),
+    ("\x1b]52;c;dGVzdA==\x07查看文档", r"\x1b]52;c;dGVzdA==\x07查看文档"),
+    ("\x1b[31mSearch docs\x1b[0m", r"\x1b[31mSearch docs\x1b[0m"),
+    ("\x9d52;c;dGVzdA==\x9cLookup", r"\x9d52;c;dGVzdA==\x9cLookup"),
+])
+def test_list_mcp_matches_interactive_output(config, tmp_path, monkeypatch, description, summary):
+    from rs_harness import cli
+
+    queries = []
+
+    async def configured(loaded):
+        queries.append(loaded.runtime.sessions_dir)
+        return [{"name": "docs", "transport": "http", "tools": [{
+            "name": "mcp__docs__search", "raw_name": "search", "description": description,
+            "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+            "permission": "allow",
+        }]}]
+
+    async def unexpected_ask(*args, **kwargs):
+        pytest.fail("Listing MCP must not call the model")
+
+    monkeypatch.setattr(cli, "get_configured_mcp", configured, raising=False)
+    monkeypatch.setattr(cli, "ask", unexpected_ask)
+    runner = CliRunner()
+    options = ["--config", str(tmp_path / "config.toml")]
+    listed = runner.invoke(app, ["list-mcp", *options], color=True)
+    interactive = runner.invoke(app, options, input="/mcp\n/quit\n", color=True)
+    assert listed.exit_code == interactive.exit_code == 0, (listed.output, interactive.output)
+    assert listed.stdout.strip() in interactive.stdout
+    assert "Configured MCP servers (1)" in listed.stdout
+    assert "docs (http), tools: 1" in listed.stdout
+    expected = "  - search [allow]" + (f": {summary}" if summary else "")
+    assert expected in listed.stdout.splitlines()
+    assert "mcp__" not in listed.stdout and "MCP name:" not in listed.stdout
+    assert "Input schema" not in listed.stdout and '"required"' not in listed.stdout
+    assert '"query"' not in listed.stdout and "\\n" not in listed.stdout
+    assert not any(char in listed.stdout + interactive.stdout for char in ("\x1b", "\x07", "\x9b", "\x9c", "\x9d"))
+    assert queries == [config.runtime.sessions_dir] * 2
+    assert not config.runtime.sessions_dir.exists()
+    assert "list-mcp" in runner.invoke(app, ["--help"]).stdout
+
+
+@pytest.mark.parametrize("placement", ["root", "child", "override"])
+def test_list_mcp_config_options(config, tmp_path, monkeypatch, placement):
+    from rs_harness import cli
+
+    async def configured(loaded):
+        assert loaded.runtime.sessions_dir == config.runtime.sessions_dir
+        return []
+
+    monkeypatch.setattr(cli, "get_configured_mcp", configured, raising=False)
+    options = ["--config", str(tmp_path / "config.toml")]
+    args = [*options, "list-mcp"] if placement == "root" else ["list-mcp", *options]
+    if placement == "override":
+        args = ["--config", str(tmp_path / "missing.toml"), "--session-id", "invalid", *args]
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == 0, result.output
+    assert "No MCP servers configured." in result.stdout
+    assert not config.runtime.sessions_dir.exists()
+
+
+def test_mcp_empty_config_and_invalid_arguments_do_not_create_session(config, tmp_path, monkeypatch):
+    from rs_harness import cli
+
+    async def unexpected(*args, **kwargs):
+        pytest.fail("Listing MCP must not call the model")
+
+    monkeypatch.setattr(cli, "ask", unexpected)
+    runner = CliRunner()
+    options = ["--config", str(tmp_path / "config.toml")]
+    listed = runner.invoke(app, ["list-mcp", *options])
+    assert listed.exit_code == 0 and "No MCP servers configured." in listed.stdout
+    interactive = runner.invoke(app, options, input="/mcp\n/mcp docs\n/help\n/quit\n")
+    assert interactive.exit_code == 0, interactive.output
+    assert "No MCP servers configured." in interactive.stdout and "Usage: /mcp" in interactive.stderr
+    assert "/mcp        show configured MCP servers and tools" in interactive.stdout
+    assert not config.runtime.sessions_dir.exists()
+
+
+def test_mcp_query_error_keeps_interactive_loop(config, tmp_path, monkeypatch):
+    from rs_harness import cli
+    from langchain_core.tools import ToolException
+
+    async def unavailable(*args):
+        raise ToolException("mcp_connect_failed: docs")
+
+    monkeypatch.setattr(cli, "get_configured_mcp", unavailable, raising=False)
+    options = ["--config", str(tmp_path / "config.toml")]
+    listed = CliRunner().invoke(app, ["list-mcp", *options])
+    interactive = CliRunner().invoke(app, options, input="/mcp\n/help\n/quit\n")
+    assert listed.exit_code == 1 and "mcp_connect_failed" in listed.stderr
+    assert interactive.exit_code == 0 and "mcp_connect_failed" in interactive.stderr
+    assert "/mcp        show configured MCP servers and tools" in interactive.stdout
+    assert not config.runtime.sessions_dir.exists()
+
+
+@pytest.mark.parametrize("session_id", ["invalid", "a" * 32])
+def test_list_mcp_does_not_use_root_session(config, tmp_path, session_id):
+    result = CliRunner().invoke(app, ["--session-id", session_id, "list-mcp", "--config", str(tmp_path / "config.toml")])
+    assert result.exit_code == 0 and "No MCP servers configured." in result.stdout
+    assert not config.runtime.sessions_dir.exists()
+
+
+def test_list_mcp_has_no_session_option():
+    result = CliRunner().invoke(app, ["list-mcp", "--help"])
+    assert result.exit_code == 0 and "--session-id" not in result.stdout
+
+
 def test_reasoning_command_persists_and_resets_without_a_session(config, tmp_path):
     path = tmp_path / "config.toml"
     runner = CliRunner()

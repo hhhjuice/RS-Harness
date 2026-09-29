@@ -11,13 +11,14 @@ from typing import Annotated, Sequence
 import typer
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import HumanMessage
+from langchain_core.tools import ToolException
 from prompt_toolkit import PromptSession
 from prompt_toolkit.output.color_depth import ColorDepth
 from prompt_toolkit.output.defaults import create_output
 from prompt_toolkit.styles import Style
 
 from . import __version__
-from .application import ApprovalStatus, InteractionResult, ask, create_session, get_pending_approvals, resume
+from .application import ApprovalStatus, InteractionResult, ask, create_session, get_configured_mcp, get_pending_approvals, resume
 from .config import REASONING_EFFORTS, Config, ConfigError, save_reasoning_effort
 from .inputs import InputError, build_human_message
 from .progress import CliProgress
@@ -41,6 +42,28 @@ def _print_skills(config: Config) -> None:
     skills = SkillLoader(config.runtime.skills_dir)
     typer.echo(f"Skills directory: {config.runtime.skills_dir}")
     typer.echo(f"Installed skills ({len(skills.skills)}):\n{skills.catalog()}" if skills.skills else "No skills installed.")
+
+
+def _terminal_text(value: str) -> str:
+    """Render remote control characters literally instead of executing them in a terminal."""
+    return "".join(char if char.isprintable() else char.encode("unicode_escape").decode("ascii") for char in value)
+
+
+async def _print_mcp(config: Config) -> None:
+    servers = await get_configured_mcp(config)
+    if not servers:
+        typer.echo("No MCP servers configured.")
+        return
+    typer.echo(f"Configured MCP servers ({len(servers)}):")
+    for server in servers:
+        typer.echo(f"- {server['name']} ({server['transport']}), tools: {len(server['tools'])}")
+        for tool in server["tools"]:
+            name = _terminal_text(json.dumps(tool["raw_name"], ensure_ascii=False)[1:-1])
+            description = _terminal_text(" ".join(tool["description"].split()))
+            if len(description) > 120:
+                description = description[:117] + "..."
+            summary = f": {description}" if description else ""
+            typer.echo(f"  - {name} [{tool['permission']}]{summary}")
 
 
 def _print_result(result: InteractionResult, as_json: bool, progress: CliProgress | None = None) -> None:
@@ -229,6 +252,20 @@ def list_skill_command(
         raise typer.Exit(code=1) from exc
 
 
+@app.command("list-mcp")
+def list_mcp_command(
+    ctx: typer.Context,
+    config: Annotated[Path, typer.Option("--config", dir_okay=False)] = DEFAULT_CONFIG,
+) -> None:
+    """Show MCP servers and tools from the current configuration."""
+    try:
+        config = _root_option(ctx, "config", config)
+        asyncio.run(_print_mcp(_load(config)))
+    except (ConfigError, ToolException) as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
 async def _interactive(config_path: Path, *, session_id: str | None, workdir: Path | None) -> None:
     try:
         config_path = config_path.expanduser().resolve()
@@ -286,6 +323,7 @@ async def _interactive(config_path: Path, *, session_id: str | None, workdir: Pa
             typer.echo(
                 "/status     show session status\n"
                 "/skill      show installed skills\n"
+                "/mcp        show configured MCP servers and tools\n"
                 "/reasoning  show or set reasoning effort\n"
                 f"            {REASONING_USAGE}\n"
                 "/close      close session\n"
@@ -300,6 +338,15 @@ async def _interactive(config_path: Path, *, session_id: str | None, workdir: Pa
             try:
                 _print_skills(config)
             except ConfigError as exc:
+                typer.echo(f"Error: {exc}", err=True)
+            continue
+        if command.split(maxsplit=1)[0] == "/mcp":
+            if command != "/mcp":
+                typer.echo("Usage: /mcp", err=True)
+                continue
+            try:
+                await _print_mcp(config)
+            except (ConfigError, ToolException) as exc:
                 typer.echo(f"Error: {exc}", err=True)
             continue
         if command.split(maxsplit=1)[0] == "/reasoning":

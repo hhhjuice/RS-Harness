@@ -8,6 +8,7 @@ from ..agents.middleware import build_middleware
 from ..agents.subagent import build_delegate_tool
 from ..config import Config, ResolvedSubagent
 from ..context import AgentContext
+from ..mcp import MCPRegistry
 from ..skills import SkillLoader
 from ..tools.filesystem import edit_file, glob, read_file, read_image, write_file
 from ..tools.shell import bash
@@ -46,11 +47,14 @@ def build_agent(
         config, model=model if subagent_model is None else subagent_model,
         tools=base_tools, workdir=workdir, subagents=subagents, skills=skills,
     )
+    mcp = MCPRegistry(config.mcp, local_names=[*(item.name for item in base_tools),
+                      "delegate_task", "write_todos", "load_skill", "connect_mcp"],
+                      max_output_bytes=config.runtime.max_tool_output_bytes)
     return create_agent(
         model=model,
         tools=[*base_tools, delegate_task],
         system_prompt=config.system_prompt(workdir),
-        middleware=build_middleware(config, subagents=subagents, skills=skills),
+        middleware=build_middleware(config, subagents=subagents, skills=skills, mcp=mcp),
         context_schema=AgentContext,
         checkpointer=checkpointer,
     )

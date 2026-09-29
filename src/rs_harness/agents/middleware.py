@@ -17,9 +17,11 @@ from openai import APIConnectionError, APITimeoutError, RateLimitError
 
 from ..config import Config, ResolvedSubagent, SUBAGENT_TOOLS
 from ..inputs import InputError, validate_image_messages
+from ..mcp import MCPRegistry
 from ..skills import SkillLoader
 from ..tools.filesystem import resolve_file_path
 from .skills import SkillMiddleware
+from .mcp import MCPMiddleware
 
 
 def classify_tool_call(tool_call: dict, workdir: str) -> tuple[Literal["deny", "ask", "allow"], str]:
@@ -54,6 +56,35 @@ def needs_approval(request) -> bool:
 
 def _approval_description(tool_call, state, runtime) -> str:
     return classify_tool_call(tool_call, runtime.context.workdir)[1]
+
+
+class PermissionMiddleware(AgentMiddleware):
+    """Build one official HITL batch from local rules and the current MCP catalog."""
+
+    def __init__(self, tools: Sequence[str], mcp: MCPRegistry | None = None):
+        self.local_rules = {
+            name: {"allowed_decisions": ["approve", "reject"], "when": needs_approval,
+                   "description": _approval_description}
+            for name in ("read_file", "write_file", "edit_file", "read_image", "bash") if name in tools
+        }
+        self.mcp = mcp
+
+    def _hitl(self, state):
+        rules = dict(self.local_rules)
+        if self.mcp is not None:
+            for name, entry in self.mcp.entries(state).items():
+                rules[name] = {"allowed_decisions": ["approve", "reject"]} if self.mcp.requires_approval(entry) else False
+        return HumanInTheLoopMiddleware(interrupt_on=rules)
+
+    def after_model(self, state, runtime):
+        if self.mcp is not None:
+            self.mcp.check_sync(state)
+        return self._hitl(state).after_model(state, runtime)
+
+    async def aafter_model(self, state, runtime):
+        if self.mcp is not None:
+            await self.mcp.ensure_loaded(state)
+        return await self._hitl(state).aafter_model(state, runtime)
 
 
 class ToolDenyMiddleware(AgentMiddleware):
@@ -203,21 +234,12 @@ def build_middleware(
     subagents: Sequence[ResolvedSubagent] = (),
     skills: SkillLoader | None = None,
     allow_approval: bool = True,
+    mcp: MCPRegistry | None = None,
 ) -> list[AgentMiddleware]:
     """Build fresh middleware instances for one Agent graph."""
 
     return [
-        *([HumanInTheLoopMiddleware(interrupt_on={
-            **{
-                name: {
-                    "allowed_decisions": ["approve", "reject"],
-                    "when": needs_approval,
-                    "description": _approval_description,
-                }
-                for name in ("read_file", "write_file", "edit_file", "read_image", "bash")
-                if name in tools
-            },
-        })] if allow_approval else []),
+        *([PermissionMiddleware(tools, mcp)] if allow_approval else []),
         ModelCallLimitMiddleware(
             run_limit=config.runtime.max_model_calls,
             exit_behavior="error",
@@ -228,5 +250,6 @@ def build_middleware(
         ImageInputMiddleware(config),
         *([TodoListMiddleware()] if "write_todos" in tools else []),
         *([SkillMiddleware(skills)] if "load_skill" in tools and skills is not None else []),
+        *([MCPMiddleware(mcp)] if mcp is not None else []),
         StopHookMiddleware(),
     ]

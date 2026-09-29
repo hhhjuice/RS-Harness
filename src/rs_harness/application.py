@@ -16,6 +16,7 @@ from .agents.main import build_agent
 from .config import Config, subagents_digest
 from .context import AgentContext
 from .inputs import build_human_message, extract_answer, summarize_message_content, validate_human_message, validate_image_messages
+from .mcp import MCPRegistry
 from .sessions.catalog import Session, SessionCatalog, SessionError
 from .sessions.checkpoints import open_checkpointer
 from .sessions.recording import TrajectoryRecorder, TrajectoryWriter
@@ -97,6 +98,24 @@ async def get_pending_approvals(config: Config, session_id: str, *, model: Any |
         agent = build_agent(config, workdir=session.meta.workdir, checkpointer=checkpointer, model=model)
         snapshot = await agent.aget_state({"configurable": {"thread_id": session_id}})
     return _approval_status(session, snapshot)
+
+
+async def get_configured_mcp(config: Config) -> list[dict[str, Any]]:
+    """Discover tools from the configured MCP servers without creating or reading a session."""
+    registry = MCPRegistry(config.mcp)
+    servers = []
+    for name in sorted(config.mcp.servers):
+        catalog = await registry.connect(name, {})
+        tools = []
+        for alias, entry in sorted(catalog.entries.items()):
+            schema = entry.tool.args_schema
+            tools.append({
+                "name": alias, "raw_name": entry.raw_name, "description": entry.tool.description,
+                "input_schema": schema if isinstance(schema, dict) else schema.model_json_schema(),
+                "permission": "confirm" if registry.requires_approval(entry) else "allow",
+            })
+        servers.append({"name": name, "transport": config.mcp.servers[name].transport, "tools": tools})
+    return servers
 
 
 async def resume(

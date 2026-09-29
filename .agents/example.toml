@@ -30,3 +30,25 @@ description = "根据明确需求与调研结论在工作区完成具体实现�
 system_prompt_file = "../.agents/prompts/subagents/engineer.md"
 tools = ["read_file", "write_file", "edit_file", "glob", "bash", "read_image", "write_todos", "load_skill"]
 persistence = "per_invocation"
+
+# 可选 MCP 服务：取消注释并替换为实际服务。只向主 Agent 提供工具。
+# 启动不联网；模型调用 connect_mcp(name) 后才发现工具。
+# 连接后所有已发现工具默认 allow，无需逐项配置；仅需审批的工具配置 confirm。
+# tools 中使用远端原始工具名，整个 tools 表可省略。
+# [mcp]
+# timeout_s = 30
+#
+# [mcp.servers.docs]
+# transport = "http"
+# url = "http://127.0.0.1:8001/mcp"
+# bearer_token_env = "RSH_DOCS_TOKEN"
+#
+# [mcp.servers.deploy]
+# transport = "stdio"
+# command = "python"
+# args = ["deploy_server.py"]
+# cwd = "../workdir/mcp-demo" # 相对配置文件目录；省略时使用配置文件目录
+# env_from_env = { DEPLOY_TOKEN = "RSH_DEPLOY_TOKEN" }
+#
+# [mcp.servers.deploy.tools]
+# trigger = "confirm"

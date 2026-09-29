@@ -5,15 +5,16 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 import tempfile
 import tomllib
 import unicodedata
 from pathlib import Path
-from typing import Literal, Self, get_args
+from typing import Annotated, Literal, Self, get_args
 
 import tomlkit
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, field_validator
 
 
 class ConfigError(ValueError):
@@ -116,12 +117,70 @@ def subagents_digest(subagents: tuple[ResolvedSubagent, ...]) -> str:
     return hashlib.sha256(json.dumps(definitions, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+def mcp_name(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]", "_", value)
+
+
+class MCPServerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    tools: dict[str, Literal["allow", "confirm"]] = Field(default_factory=dict)
+
+
+class MCPStdioConfig(MCPServerConfig):
+    transport: Literal["stdio"]
+    command: str = Field(min_length=1)
+    args: list[str] = Field(default_factory=list)
+    cwd: Path = Field(default_factory=Path.cwd)
+    env_from_env: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("command")
+    @classmethod
+    def non_blank_command(cls, value: str) -> str:
+        if not value.strip() or "\x00" in value:
+            raise ValueError("command must be non-blank and contain no NUL")
+        return value
+
+    @field_validator("env_from_env")
+    @classmethod
+    def valid_environment_names(cls, value):
+        if any(not name or "=" in name or "\x00" in name for pair in value.items() for name in pair):
+            raise ValueError("environment variable names must be non-empty and contain no '=' or NUL")
+        return value
+
+
+class MCPHttpConfig(MCPServerConfig):
+    transport: Literal["http"]
+    url: HttpUrl
+    bearer_token_env: str | None = Field(default=None, min_length=1)
+
+
+class MCPConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    timeout_s: float = Field(default=30, gt=0, strict=True, allow_inf_nan=False)
+    servers: dict[str, Annotated[MCPStdioConfig | MCPHttpConfig, Field(discriminator="transport")]] = Field(default_factory=dict)
+
+    @field_validator("servers")
+    @classmethod
+    def unique_server_names(cls, value):
+        normalized = set()
+        for name in value:
+            SubagentConfig.readable_text(name)
+            safe = mcp_name(name)
+            if not safe or safe in normalized:
+                raise ValueError("MCP server IDs must be unique after name normalization")
+            normalized.add(safe)
+        return value
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     model: ModelConfig
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     subagents: tuple[SubagentConfig, ...] = Field(min_length=1)
+    mcp: MCPConfig = Field(default_factory=MCPConfig)
 
     @field_validator("subagents")
     @classmethod
@@ -164,6 +223,15 @@ class Config(BaseModel):
         for item in raw.get("subagents", []) if isinstance(raw.get("subagents"), list) else []:
             if isinstance(item, dict) and isinstance(item.get("system_prompt_file"), str) and item["system_prompt_file"].strip():
                 item["system_prompt_file"] = _resolve_path(base_dir, item["system_prompt_file"])
+
+        mcp = raw.get("mcp")
+        if isinstance(mcp, dict) and isinstance(mcp.get("servers"), dict):
+            for item in mcp["servers"].values():
+                if isinstance(item, dict) and item.get("transport") == "stdio":
+                    cwd = item.setdefault("cwd", ".")
+                    if not isinstance(cwd, str) or not cwd.strip():
+                        raise ConfigError("MCP stdio cwd must be a non-empty path")
+                    item["cwd"] = _resolve_path(base_dir, cwd)
 
         try:
             config = cls.model_validate(raw)
@@ -219,6 +287,8 @@ class Config(BaseModel):
             "bash_timeout_s": self.runtime.bash_timeout_s,
             "max_tool_output_bytes": self.runtime.max_tool_output_bytes,
             "subagents": [item.model_dump(mode="json") for item in self.subagents],
+            "mcp": {name: {"transport": server.transport,
+                           "policy_count": len(server.tools)} for name, server in self.mcp.servers.items()},
         }
 
 

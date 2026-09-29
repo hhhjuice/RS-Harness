@@ -366,13 +366,15 @@ def test_production_agent_factory_wires_middleware_and_context(config, monkeypat
     assert captured["context_schema"] is AgentContext
     assert captured["checkpointer"] == "checkpoint"
     assert {tool.name for tool in captured["tools"]} == {"read_file", "write_file", "edit_file", "glob", "bash", "read_image", "delegate_task"}
-    assert len(captured["middleware"]) == 9
-    assert isinstance(captured["middleware"][0], HumanInTheLoopMiddleware)
+    assert len(captured["middleware"]) == 10
+    assert captured["middleware"][0].name == "PermissionMiddleware"
     assert isinstance(captured["middleware"][1], ModelCallLimitMiddleware)
     assert captured["middleware"][1].run_limit == config.runtime.max_model_calls
     assert captured["middleware"][1].exit_behavior == "error"
-    assert isinstance(captured["middleware"][-3], TodoListMiddleware)
-    assert captured["middleware"][-2].name == "SkillMiddleware"
+    assert isinstance(captured["middleware"][-4], TodoListMiddleware)
+    assert captured["middleware"][-3].name == "SkillMiddleware"
+    assert captured["middleware"][-2].name == "MCPMiddleware"
+    assert captured["middleware"][-2].tools == []
     assert isinstance(captured["middleware"][-1], StopHookMiddleware)
     assert captured["middleware"][-1].hooks == ()
 

@@ -1,8 +1,22 @@
-# RS-Harness v0.0.7
+# RS-Harness v0.0.8
 
 阶段 1 提供基于 LangChain 的 Agent、SQLite 持久多轮上下文、本地 session 元数据、运行记录和 Typer CLI。阶段 2 增加官方 AgentMiddleware 组合入口、模型调用预算和运行时 context。阶段 3 接入五种基础工具、工具轨迹，以及本地和 URL 图片输入。阶段 4 接入条件审批、硬拒绝，以及跨进程审批恢复。阶段 5 接入官方任务规划和持久任务进度。阶段 6 接入官方 SubAgent 委派、具名角色与工具范围、可恢复失败反馈、持续追问、子代理免审批拒绝策略及静默 CLI 调用。
 
 阶段 7 增加 Skill 渐进式加载：技能集中维护在 `.agents/skills/<name>/SKILL.md`，由 LangChain middleware 展示目录摘要，Agent 按需调用 `load_skill(name)` 获取完整说明。
+
+阶段 8 增加 MCP Tools：在可选的 `[mcp.servers.<id>]` 中登记 stdio 或 Streamable HTTP 服务，主 Agent 按需调用 `connect_mcp(name)`，下一轮即可使用 `mcp__{server}__{tool}`。连接、分页发现、schema 和结果转换复用官方 `langchain.mcp.MCPAdapter`。示例见 [配置模板](.agents/example.toml)，配置为空时不增加工具或外部 I/O。
+
+服务连接配置不包含 `description`：stdio 配置 `command` / `args` 等连接参数，HTTP 配置 `url`。连接前目录只展示服务 ID；连接后工具的说明和参数 schema 来自 MCP `tools/list`，由官方适配器转换。
+
+MCP 连接成功后，服务提供的已发现工具默认 `allow`，无需逐项配置。可选的 `tools` 权限表以远端原始工具名为键；只有显式配置为 `confirm` 的工具需要审批，整个 `tools` 表可以省略，也保留显式 `allow` 的支持。远端工具的只读声明和描述不能覆盖显式审批策略。凭据只通过 `bearer_token_env` 或 stdio 的 `env_from_env` 引用宿主环境变量；不要把密钥放进工具参数。stdio 使用参数数组，`cwd` 相对配置文件目录解析。MCP 不进入子代理工具集合。
+
+“已连接”表示当前会话已发现并启用工具；stdio 发现和调用结束后会释放进程，服务应自行持久化业务状态。主图每次重建时校验连接配置与模型可见工具目录；配置、策略或目录变化后应新建会话，临时故障可排除后重试原审批。审批查询只读 Checkpoint，不启动服务。MCP 调用失败后不会自动重试；超时可能已产生副作用，应先核对结果。交互式 MCP 输入请求会被取消，本版不支持 OAuth 登录流程、prompts/resources 或目录热更新。
+
+MCP 生产调用使用异步 `ask` / `resume`；直接调用图时使用 `ainvoke`。`mcp.timeout_s` 限制发现及调用，`runtime.max_tool_output_bytes` 限制 MCP 正文、错误文本与结构化 artifact；超限时保留执行状态并报告输出省略。实现与验收记录见 [阶段八实施文档](<./docs/v0.0.8——MCP Tools.md>)。
+
+使用 `rsh list-mcp`，或在交互提示符输入 `/mcp`，快速查看当前配置中的 MCP 服务名称、传输类型、工具数量，以及每个工具的名称、简短说明和 allow/confirm 策略。工具按服务分组，每个工具显示一行；不展示 Input schema 或内部调用前缀，说明折叠为单行并限制为 120 个字符，终端控制字符会转义为可见文本。两者均不与会话绑定，不需要先创建会话或调用 connect_mcp。`list-mcp` 支持在命令前后指定 `--config`，不提供 `--session-id` 参数；未配置服务时显示 `No MCP servers configured.`。
+
+查询通过官方 SDK 发现配置中服务的当前工具目录，stdio 服务可能因此启动发现进程。查询不读取 Session 或 Checkpoint，不调用模型或执行工具，也不会改变任何会话中的 MCP 启用状态。服务不可达时报告脱敏的发现错误；交互模式显示错误后继续接受命令。
 
 ```bash
 uv sync
@@ -36,6 +50,7 @@ uv run rsh
 uv run rsh --session-id <SESSION_ID>
 uv run rsh create-session
 uv run rsh list-skill
+uv run rsh list-mcp
 uv run rsh ask "你好"
 uv run rsh ask --image ./sample.png "描述图片"
 uv run rsh ask --image ./sample.png --json
@@ -94,7 +109,7 @@ Bash 使用区分大小写的字面子串规则，例如 `rm -rf /tmp/demo` 也�
 
 `ask` 在 stdin 和 stderr 均为 TTY 时直接执行工具审批：显示待审批数量、工具名称和实际操作，逐项接受 `y/yes` 或 `n/no`，收齐后立即恢复执行；若恢复后再次暂停，会继续使用最新操作重新询问。`ask` 的执行退出码为成功 `0`、失败 `1`、等待审批 `2`；`--json` 的 stdout 只包含最终一个 JSON 对象，待审批时 `answer/error` 均为 null。非 TTY、管道或重定向下不消费后续输入作为批准，而是以退出码 `2` 保留暂停状态；待审 session 不接受新的普通问题，可在交互终端用 `--session-id` 继续处理或关闭。同批只要存在 ask，整个工具节点都会等待；allow/deny 不占人工决定位置，恢复后仍由框架默认调度。
 
-交互模式可连续输入多轮问题，整个交互过程共用一个异步事件循环。TTY 下普通 `rsh>` 输入提示显示为蓝色，审批输入提示显示为黄色。触发审批时显示待审批数量、工具名称和实际操作；审批阶段只接受 `y/yes` 或 `n/no`，分别对应批准或拒绝，其他输入不会改变审批状态。空输入不批准，收齐后才提交。审批期间 Ctrl+C 或 Ctrl+D 丢弃尚未提交的决定并保留暂停，之后可通过 `--session-id` 继续；普通交互阶段仍支持 `/status`、`/skill`、`/close`、`/quit` 和 `/exit`。审批展示和提示写入 stderr，最终回答写入 stdout。管道或重定向模式遇到待审即以 2 退出，不消费后续输入作为批准。
+交互模式可连续输入多轮问题，整个交互过程共用一个异步事件循环。TTY 下普通 `rsh>` 输入提示显示为蓝色，审批输入提示显示为黄色。触发审批时显示待审批数量、工具名称和实际操作；审批阶段只接受 `y/yes` 或 `n/no`，分别对应批准或拒绝，其他输入不会改变审批状态。空输入不批准，收齐后才提交。审批期间 Ctrl+C 或 Ctrl+D 丢弃尚未提交的决定并保留暂停，之后可通过 `--session-id` 继续；普通交互阶段仍支持 `/status`、`/skill`、`/mcp`、`/close`、`/quit` 和 `/exit`。审批展示和提示写入 stderr，最终回答写入 stdout。管道或重定向模式遇到待审即以 2 退出，不消费后续输入作为批准。
 
 交互模式和普通 `ask` 会实时显示主代理模型调用与普通工具开始、完成/失败通知。`delegate_task` 只显示普通工具级开始、完成/失败通知，不展开 query、子回复或内部错误详情；其内部模型、工具、Todo 和中间件事件均不打印。工具开始执行时输出 `[Tool] Running <tool>` 及操作摘要；成功后输出 `[Tool] Completed <tool> (<elapsed>s)`，失败时补充 `[Tool] Failed <tool> (<elapsed>s)` 和错误信息。结束通知复用开始时的操作摘要，摘要先脱敏再截断，最多 160 个字符，长操作的差异可能被截断。写入/编辑正文只显示长度，成功结果正文不展开。命令摘要隐藏敏感变量赋值和 Authorization 头，无法确定敏感值边界时隐藏整条命令摘要。运行提示默认使用英文。中间件默认静默，仅在以下情况通知：
 
@@ -142,3 +157,5 @@ v0.0.5 交付时离线测试 335 项、真实模型验收 14 项全部通过，�
 Python 调用方应在同一事件循环内连续 `await ask(...)`、`await get_pending_approvals(...)` 和 `await resume(...)`。锁定版本的 langchain-openai 会缓存默认异步 HTTP 客户端，同一进程中反复用 `asyncio.run` 创建新循环可能触发 `Event loop is closed`；CLI 每次运行的提问和审批恢复保持同一循环。
 
 v0.0.7 于 2026-09-27 完成 Skill 加载，初次交付通过 651 项离线回归（含新增 50 项 Skill 测试）和 4 个 `glm-5.3-flash` 真实模型场景。同日将运行资源统一到 `.agents/` 后，重新通过 655 项离线测试及原有 4 项 Skill 真实模型测试，并核对迁移前后的文件完整性。实现、权限边界和两次验收记录见 [阶段七实施文档](<./docs/v0.0.7——Skill 渐进式加载.md>) 第 13—14 节。如需让子代理使用技能，请在对应 `tools` 中加入 `load_skill`，再新建父 session。
+
+v0.0.8 于 2026-09-28 完成 MCP Tools，通过 739 项离线测试（新增 68 项 MCP 验证）及 7 个 `glm-5.3-flash` 真实模型场景。测试涵盖 stdio/HTTP、动态工具与权限、SQLite 新进程恢复、取消清理、CLI JSON、图片及主子工具隔离。测试夹具和验收命令见阶段八实施文档第 14 节。
