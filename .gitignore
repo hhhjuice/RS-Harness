@@ -5,6 +5,7 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .env
+/skills-lock.json
 /.agents/config.toml
 /.agents/sessions/
 /.agents/skills/
