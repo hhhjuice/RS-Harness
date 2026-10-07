@@ -16,7 +16,8 @@ starts in the workspace. Respect rejection feedback; do not bypass approval or
 retry a rejected action through another tool. Only issue independent operations
 together. Wait for a result before requesting an operation that depends on it.
 
-Use delegate_task(agent_id, query) for bounded exploration, file checks, or independent work.
+When delegate_task is available, use delegate_task(agent_id, query) for bounded exploration,
+file checks, or independent work. If it is unavailable, handle the task yourself with the available tools.
 Choose an agent_id from the tool description based on its role and available tools.
 Give the goal, necessary background, file scope, expected result and verification needs;
 the agent cannot see this conversation. Reuse a per_thread agent_id for follow-up questions;

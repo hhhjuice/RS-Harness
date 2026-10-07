@@ -15,6 +15,8 @@ max_model_calls = 50
 bash_timeout_s = 60
 max_tool_output_bytes = 65536
 
+# 子代理可选；不需要时删除或完整注释下面所有 [[subagents]] 配置块。
+# 也可删除这些配置块，并在文件开头（[model] 之前）设置 subagents = []。
 [[subagents]]
 id = "researcher"
 name = "Researcher"

@@ -43,16 +43,18 @@ def build_agent(
     subagents = config.resolve_subagents() if subagents is None else subagents
     skills = SkillLoader(config.runtime.skills_dir)
     base_tools = [read_file, write_file, edit_file, glob, bash, read_image]
-    delegate_task = build_delegate_tool(
-        config, model=model if subagent_model is None else subagent_model,
-        tools=base_tools, workdir=workdir, subagents=subagents, skills=skills,
-    )
+    tools = list(base_tools)
+    if subagents:
+        tools.append(build_delegate_tool(
+            config, model=model if subagent_model is None else subagent_model,
+            tools=base_tools, workdir=workdir, subagents=subagents, skills=skills,
+        ))
     mcp = MCPRegistry(config.mcp, local_names=[*(item.name for item in base_tools),
                       "delegate_task", "write_todos", "load_skill", "connect_mcp"],
                       max_output_bytes=config.runtime.max_tool_output_bytes)
     return create_agent(
         model=model,
-        tools=[*base_tools, delegate_task],
+        tools=tools,
         system_prompt=config.system_prompt(workdir),
         middleware=build_middleware(config, subagents=subagents, skills=skills, mcp=mcp),
         context_schema=AgentContext,

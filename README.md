@@ -24,7 +24,7 @@ mkdir -p .agents
 cp .agents/example.toml .agents/config.toml
 ```
 
-RSH 启动默认读取当前目录下的 `.agents/config.toml`，也可用 `--config` 显式指定其他配置。在该文件的 `[model]` 中填写 `model`、`base_url` 和 `api_key`；复制示例仅用于首次配置，已有本地配置无需覆盖；请补齐示例中的 `[[subagents]]` 定义。Python 调用 `Config.load()` 使用相同默认入口，不向父目录搜索或回退到旧配置。
+RSH 启动默认读取当前目录下的 `.agents/config.toml`，也可用 `--config` 显式指定其他配置。在该文件的 `[model]` 中填写 `model`、`base_url` 和 `api_key`；复制示例仅用于首次配置，已有本地配置无需覆盖；`[[subagents]]` 为可选配置，不需要子代理时可删除或完整注释所有子代理配置块。Python 调用 `Config.load()` 使用相同默认入口，不向父目录搜索或回退到旧配置。
 
 运行资源统一存放在 `.agents/`：技能位于 `.agents/skills/`，主、子 Agent 提示词位于 `.agents/prompts/`，会话数据位于 `.agents/sessions/`。`skills_dir`、`system_prompt_file`、`sessions_dir` 的默认值分别为 `../.agents/skills`、`../.agents/prompts/system.md`、`../.agents/sessions`，均相对 TOML 所在目录解析；相对的 `checkpoint_file` 继续相对会话目录解析，默认得到 `.agents/sessions/checkpoints.sqlite3`。显式配置可覆盖这些路径，不自动搜索旧目录。会话数据由 Git 忽略，技能与提示词可纳入版本管理；会话实现代码保留在 Python 包中。
 
@@ -80,7 +80,7 @@ Skill 目录由 `[runtime].skills_dir` 配置，默认 `../.agents/skills`，相
 
 规划工具只更新状态，不执行清单中的操作，也不提供提前授权。它与需审工具同批出现时，会一起等待审批；恢复后规划正常更新，实际操作按批准或拒绝执行。同一响应中的多个 `write_todos` 由官方中间件返回错误，其他工具继续遵循原有执行机制。规划产生的后续模型调用仍计入预算；默认 Stop Hook 不强制清空未完成任务。用户可在问答中要求汇报进度，开发者可读取 `agent.aget_state(...).values.get("todos", [])`；当前 `/status` 不展示计划，CLI JSON 结构保持不变。
 
-主 Agent 使用 `delegate_task(agent_id, query)` 选择配置中的子 Agent。每个 `[[subagents]]` 定义包含唯一 `id`、可读 `name`、职责 `description`、独立 `system_prompt_file`、工具白名单 `tools` 和记忆模式 `persistence`。提示词路径相对于 TOML 文件解析，支持 `{workdir}`；名称、角色、工具、工作目录不能通过模型的委派参数覆盖。配置至少包含一个子定义；重复 id、未知工具、重复工具及缺失或空提示词在执行前报错。
+主 Agent 使用 `delegate_task(agent_id, query)` 选择配置中的子 Agent。每个 `[[subagents]]` 定义包含唯一 `id`、可读 `name`、职责 `description`、独立 `system_prompt_file`、工具白名单 `tools` 和记忆模式 `persistence`。提示词路径相对于 TOML 文件解析，支持 `{workdir}`；名称、角色、工具、工作目录不能通过模型的委派参数覆盖。可省略所有子代理定义，或在 TOML 顶层（任何表头之前）设置 `subagents = []`；此时只运行主 Agent，不创建子图，也不注册 `delegate_task`。已配置的子代理仍会校验：重复 id、未知工具、重复工具及缺失或空提示词在执行前报错。
 
 默认预设为 `researcher`（Researcher，持续记忆）和 `engineer`（Engineer，每次独立）。Researcher 负责工作区读取与需求调研，梳理现状、约束、证据和验收标准；Engineer 根据明确需求与调研结论在工作区完成具体实现并验证结果。工具范围落实到模型和执行图，包含 middleware 提供的 `write_todos` 与 `load_skill`；`tools = []` 表示纯推理，省去相应名称即不装配对应 middleware。子工具集中没有再次委派工具。`researcher` 提供读取、查找、Todo 和 Skill 加载；`engineer` 另有写入、编辑和 Bash 工具；拥有 `bash` 的角色仍具备通用命令执行能力，工具白名单不构成 OS 沙箱。
 

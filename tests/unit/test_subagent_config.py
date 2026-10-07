@@ -14,8 +14,36 @@ def test_invalid_definition_is_rejected(config, update):
         SubagentConfig.model_validate({**config.subagents[0].model_dump(), **update})
 
 
-@pytest.mark.parametrize("definitions", [[], None, "worker"])
-def test_definitions_are_required_and_nonempty(config, definitions):
+@pytest.mark.parametrize("explicit_empty", [False, True])
+def test_definitions_can_be_omitted_or_empty(config, explicit_empty):
+    data = config.model_dump(exclude={"subagents"})
+    if explicit_empty:
+        data["subagents"] = []
+    loaded = Config.model_validate(data)
+    assert loaded.subagents == ()
+    assert loaded.resolve_subagents() == ()
+    assert loaded.summary()["subagents"] == []
+
+
+@pytest.mark.parametrize("setting", ["omitted", "commented", "empty"])
+def test_load_without_subagent_definitions(config, tmp_path, setting):
+    path = tmp_path / "config.toml"
+    main, header, definitions = path.read_text().partition("[[subagents]]")
+    if setting == "commented":
+        main += "\n".join(f"# {line}" for line in (header + definitions).splitlines())
+    elif setting == "empty":
+        main = "subagents = []\n\n" + main
+    path.write_text(main)
+    config.subagents[0].system_prompt_file.unlink()
+
+    loaded = Config.load(path)
+    assert loaded.subagents == ()
+    assert loaded.resolve_subagents() == ()
+    assert loaded.summary()["subagents"] == []
+
+
+@pytest.mark.parametrize("definitions", [None, "worker", {}])
+def test_invalid_definition_types_are_rejected(config, definitions):
     with pytest.raises(ValueError):
         Config.model_validate({**config.model_dump(), "subagents": definitions})
 

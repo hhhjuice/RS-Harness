@@ -179,7 +179,7 @@ class Config(BaseModel):
 
     model: ModelConfig
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
-    subagents: tuple[SubagentConfig, ...] = Field(min_length=1)
+    subagents: tuple[SubagentConfig, ...] = ()
     mcp: MCPConfig = Field(default_factory=MCPConfig)
 
     @field_validator("subagents")

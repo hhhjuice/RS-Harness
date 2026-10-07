@@ -5,6 +5,7 @@ import sys
 from uuid import uuid4
 
 import pytest
+import tomlkit
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.errors import GraphInterrupt
@@ -12,6 +13,7 @@ from langgraph.errors import GraphInterrupt
 from rs_harness import application
 from rs_harness.agents.main import build_agent
 from rs_harness.agents.middleware import StopHookMiddleware, build_middleware
+from rs_harness.config import Config
 from rs_harness.progress import CliProgress
 from rs_harness.sessions.checkpoints import open_checkpointer
 from rs_harness.sessions.recording import TrajectoryRecorder, TrajectoryWriter
@@ -75,6 +77,62 @@ def test_factories_use_separate_middleware_and_inherited_child_checkpointer(conf
     assert next(m for m in child["middleware"] if m.name == "ToolDenyMiddleware").allow_approval is False
     schema = parent["tools"][-1].tool_call_schema.model_json_schema()
     assert set(schema["properties"]) == {"agent_id", "query"}
+
+
+@pytest.mark.parametrize("explicit_override", [False, True])
+def test_factory_without_subagents_skips_delegation(config, monkeypatch, explicit_override):
+    graphs = []
+
+    def capture(**kwargs):
+        graphs.append(kwargs)
+        return object()
+
+    def unexpected_delegate(*args, **kwargs):
+        pytest.fail("Delegation must not be built without subagents")
+
+    monkeypatch.setattr("langchain.agents.create_agent", capture)
+    monkeypatch.setattr("rs_harness.agents.main.build_delegate_tool", unexpected_delegate)
+    kwargs = {"subagents": ()} if explicit_override else {}
+    if not explicit_override:
+        config = Config.model_validate(config.model_dump(exclude={"subagents"}))
+    model = ScriptedModel([AIMessage(content="unused")])
+    build_agent(config, model=model, workdir="/work", checkpointer="parent-saver", **kwargs)
+
+    assert len(graphs) == 1
+    parent = graphs[0]
+    assert parent["model"] is model
+    assert parent["checkpointer"] == "parent-saver"
+    assert {tool.name for tool in parent["tools"]} == {
+        "read_file", "write_file", "edit_file", "glob", "bash", "read_image",
+    }
+    assert "SubagentBatchMiddleware" not in {m.name for m in parent["middleware"]}
+
+
+@pytest.mark.parametrize("explicit_empty", [False, True])
+async def test_main_agent_without_subagents_executes_tools_and_continues(config, tmp_path, explicit_empty):
+    path = tmp_path / "config.toml"
+    document = tomlkit.parse(path.read_text())
+    del document["subagents"]
+    path.write_text(("subagents = []\n\n" if explicit_empty else "") + tomlkit.dumps(document))
+    config.subagents[0].system_prompt_file.unlink()
+    config = Config.load(path)
+    (tmp_path / "input.txt").write_text("main-agent-evidence")
+    parent = ScriptedModel([
+        request(call("read_file", {"path": "input.txt"}, "main-read")),
+        AIMessage(content="Verified"), AIMessage(content="Continued"),
+    ])
+    session = application.create_session(config, workdir=str(tmp_path))
+    first = await application.ask(config, session.session_id, "Read input.txt", model=parent)
+    assert first.status == "succeeded" and first.answer == "Verified", first.error
+    assert "main-agent-evidence" in tool_messages(parent.inputs[1])[0].content
+    assert {tool.name for tool in parent.bound_tools} == {
+        "read_file", "write_file", "edit_file", "glob", "bash", "read_image", "write_todos", "load_skill",
+    }
+
+    second = await application.ask(config, session.session_id, "Continue", model=parent)
+    assert second.status == "succeeded" and second.answer == "Continued", second.error
+    assert [m.content for m in parent.inputs[-1] if isinstance(m, HumanMessage)] == ["Read input.txt", "Continue"]
+    assert "main-agent-evidence" in tool_messages(parent.inputs[-1])[0].content
 
 
 async def test_delegation_executes_tools_and_preserves_context_boundary(config, tmp_path, monkeypatch):
