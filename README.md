@@ -58,6 +58,8 @@ uv run rsh ask --image ./sample.png --json
 
 `--config`、`--session-id` 和 `--workdir` 可放在子命令前后。放在子命令前时作为缺省值，子命令上的显式参数优先。
 
+`rsh --help` 展示 CLI 子命令，并说明 `rsh ask --image` 的图片输入方式及支持 `--json` 的子命令；交互 `/help` 展示交互命令清单。各子命令的完整参数可通过 `rsh COMMAND --help` 查看；`--image` 是 `ask` 的选项，须放在 `ask` 后。
+
 `--image` 可重复使用，图片和文本组成同一条标准消息；省略文本可提交仅图片输入。新会话的相对图片路径按 `--workdir` 或当前目录解析，续聊按 session 原工作目录解析。用户明确指定的绝对图片路径可以位于工作目录外。输入无效时不会创建新会话；`ask --json` 返回 JSON，错误退出码为 1。
 
 本地图片按文件内容识别 JPEG、PNG、GIF、WebP，编码为带 MIME 的 base64 标准内容块。图片数据随 SQLite 保存，原文件删除后仍可续聊；HTTP(S) URL 直接交给 provider 获取，恢复后仍依赖 URL 可达。交互模式可用 `--session-id` 继续图片会话；用户可通过 `ask --image` 提交图片，也可在对话中让 Agent 调用 `read_image` 查看本地图片。

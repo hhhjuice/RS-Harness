@@ -16,6 +16,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.output.color_depth import ColorDepth
 from prompt_toolkit.output.defaults import create_output
 from prompt_toolkit.styles import Style
+from rich.markup import escape
 
 from . import __version__
 from .application import ApprovalStatus, InteractionResult, ask, create_session, get_configured_mcp, get_pending_approvals, resume
@@ -25,13 +26,34 @@ from .progress import CliProgress
 from .sessions.catalog import SessionBusy, SessionCatalog, SessionError
 from .skills import SkillLoader
 
-app = typer.Typer(add_completion=False, no_args_is_help=False)
-
 RSH_PROMPT = [("class:rsh-prompt", "rsh> ")]
 RSH_PROMPT_STYLE = Style.from_dict({"rsh-prompt": "ansiblue"})
 APPROVAL_PROMPT = [("class:approval-prompt", "Execute? [yes/no]> ")]
 APPROVAL_PROMPT_STYLE = Style.from_dict({"approval-prompt": "ansiyellow"})
 REASONING_USAGE = "/reasoning [none|minimal|low|medium|high|xhigh|max|default]"
+INTERACTIVE_HELP = (
+    "/help       show this help\n"
+    "/status     show session status\n"
+    "/skill      show installed skills\n"
+    "/mcp        show configured MCP servers and tools\n"
+    "/reasoning  show or set reasoning effort\n"
+    f"            {REASONING_USAGE}\n"
+    "/close      close session\n"
+    "/quit       leave session running\n"
+    "/exit       leave session running"
+)
+CLI_USAGE_HELP = (
+    "Images: rsh ask --image PATH_OR_URL [TEXT]; repeat --image for multiple images.\n"
+    "JSON output: rsh COMMAND --json (ask, create-session, list-session, close-session).\n"
+    "Run rsh COMMAND --help for all command options."
+)
+
+app = typer.Typer(
+    add_completion=False,
+    no_args_is_help=False,
+    help="Start an interactive session, or run a command.",
+    epilog=escape(CLI_USAGE_HELP),
+)
 
 
 def _load(path: Path) -> Config:
@@ -153,6 +175,7 @@ def ask_command(
     as_json: Annotated[bool, typer.Option("--json")] = False,
     images: Annotated[list[str] | None, typer.Option("--image", help="Local image path or HTTP(S) URL; repeat for multiple images.")] = None,
 ) -> None:
+    """Send text and/or images (--image); use --json for JSON output."""
     if not text.strip() and not images:
         raise typer.Exit(code=0)
     try:
@@ -189,6 +212,7 @@ def create_session_command(
     workdir: Annotated[Path | None, typer.Option("--workdir", file_okay=False)] = None,
     as_json: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
+    """Create a session; use --json for session details."""
     try:
         config = _root_option(ctx, "config", config)
         workdir = _root_option(ctx, "workdir", workdir)
@@ -206,6 +230,7 @@ def list_session_command(
     config: Annotated[Path, typer.Option("--config", exists=True, dir_okay=False)] = DEFAULT_CONFIG,
     as_json: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
+    """List sessions; use --json for session details."""
     try:
         config = _root_option(ctx, "config", config)
         sessions = SessionCatalog.list(_load(config))
@@ -226,6 +251,7 @@ def close_session_command(
     config: Annotated[Path, typer.Option("--config", exists=True, dir_okay=False)] = DEFAULT_CONFIG,
     as_json: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
+    """Close the selected session; use --json for session details."""
     try:
         session_id = _root_option(ctx, "session_id", session_id)
         if session_id is None:
@@ -320,16 +346,7 @@ async def _interactive(config_path: Path, *, session_id: str | None, workdir: Pa
         if command in {"/quit", "/exit"}:
             break
         if command == "/help":
-            typer.echo(
-                "/status     show session status\n"
-                "/skill      show installed skills\n"
-                "/mcp        show configured MCP servers and tools\n"
-                "/reasoning  show or set reasoning effort\n"
-                f"            {REASONING_USAGE}\n"
-                "/close      close session\n"
-                "/quit       leave session running\n"
-                "/exit       leave session running"
-            )
+            typer.echo(INTERACTIVE_HELP)
             continue
         if command.split(maxsplit=1)[0] == "/skill":
             if command != "/skill":

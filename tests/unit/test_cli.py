@@ -4,6 +4,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from typer.main import get_command
 from typer.testing import CliRunner
 
 from rs_harness.cli import app
@@ -80,14 +81,72 @@ def test_empty_or_exit_pipe_input_leaves_no_session(config, tmp_path, text):
     assert SessionCatalog.list(config) == []
 
 
-def test_help_shows_reasoning_options(tmp_path, config):
+def test_root_help_lists_all_commands_and_options_without_config(tmp_path, monkeypatch):
+    from rs_harness import cli
+
+    def unexpected_load(*args):
+        pytest.fail("Help must not load configuration")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_load", unexpected_load)
+    result = CliRunner().invoke(app, ["--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "rsh ask --image" in result.stdout
+    assert "--json" in result.stdout
+    assert "rsh COMMAND --help" in result.stdout
+    assert "Interactive commands:" not in result.stdout
+    assert "/reasoning" not in result.stdout
+    command = get_command(app)
+    for name, child in command.commands.items():
+        assert name in result.stdout
+        for parameter in child.params:
+            for option in parameter.opts + parameter.secondary_opts:
+                if option.startswith("--"):
+                    assert option in result.stdout, (name, option)
+    for parameter in command.params:
+        for option in parameter.opts + parameter.secondary_opts:
+            assert option in result.stdout
+
+
+@pytest.mark.parametrize("name", ["ask", "create-session", "list-session", "close-session", "list-skill", "list-mcp"])
+def test_subcommand_help_lists_all_options_without_config(tmp_path, monkeypatch, name):
+    from rs_harness import cli
+
+    def unexpected_load(*args):
+        pytest.fail("Help must not load configuration")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_load", unexpected_load)
+    result = CliRunner().invoke(app, [name, "--help"])
+
+    assert result.exit_code == 0, result.output
+    for parameter in get_command(app).commands[name].params:
+        for option in parameter.opts + parameter.secondary_opts:
+            if option.startswith("--"):
+                assert option in result.stdout
+
+
+def test_interactive_help_lists_only_interactive_commands(tmp_path, config, monkeypatch):
+    from rs_harness import cli
+
+    async def unexpected_ask(*args, **kwargs):
+        pytest.fail("Help must not call the model")
+
+    monkeypatch.setattr(cli, "ask", unexpected_ask)
     result = CliRunner().invoke(
         app, ["--config", str(tmp_path / "config.toml")], input="/help\n/quit\n",
     )
 
     assert result.exit_code == 0, result.output
+    for command in ("/help", "/status", "/skill", "/mcp", "/reasoning", "/close", "/quit", "/exit"):
+        assert any(line.startswith(f"{command} ") for line in result.stdout.splitlines()), command
     assert "/reasoning [none|minimal|low|medium|high|xhigh|max|default]" in result.output
     assert "/skill      show installed skills" in result.output
+    assert "Images:" not in result.stdout
+    assert "JSON output:" not in result.stdout
+    assert "rsh COMMAND --help" not in result.stdout
+    assert not config.runtime.sessions_dir.exists()
 
 
 @pytest.fixture
