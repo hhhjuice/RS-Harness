@@ -4,6 +4,7 @@ base_url = ""
 api_key = ""
 timeout_s = 60
 max_tokens = 4096
+# context_window = 128000 # 可选覆盖模型上下文容量；max_tokens 仅控制输出上限
 # reasoning_effort = "high" # none|minimal|low|medium|high|xhigh|max
 
 [runtime]

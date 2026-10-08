@@ -23,7 +23,6 @@ def build_delegate_tool(
 
     available = {item.name: item for item in tools}
     graphs = {}
-    definitions = {item.id: item for item in subagents}
     for definition in subagents:
         graph = create_agent(
             model=model,
@@ -49,6 +48,13 @@ def build_delegate_tool(
             graph = (StateGraph(MessagesState).add_node(node, graph)
                      .add_edge(START, node).add_edge(node, END).compile())
         graphs[definition.id] = graph
+
+    return make_delegate_tool(subagents, graphs)
+
+
+def make_delegate_tool(subagents: Sequence[ResolvedSubagent], graphs: dict[str, Any]) -> BaseTool:
+    """Share the actual dispatch schema with offline context inspection."""
+    definitions = {item.id: item for item in subagents}
 
     @tool
     async def delegate_task(agent_id: str, query: str, runtime: ToolRuntime[AgentContext]):

@@ -247,7 +247,7 @@ def test_sqlite_new_process_approval_query_and_continuation(config, tmp_path, de
     assert continued["result"]["status"] == "succeeded", continued
     assert "mcp__deploy__trigger" in continued["tool_history"][0]
     assert successful_calls(log).count("status") == 1  # graph rebuild does not replay tools
-    assert set(continued["connections"]["deploy"]) == {"config_digest", "catalog_digest"}
+    assert set(continued["connections"]["deploy"]) == {"config_digest", "catalog_digest", "tool_schemas"}
 
 
 @pytest.mark.parametrize("change", ["removed", "empty", "policy", "target", "schema", "unavailable"])

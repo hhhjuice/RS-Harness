@@ -38,6 +38,7 @@ class ModelConfig(BaseModel):
     api_key: SecretStr = Field(default=SecretStr(""), exclude=True, repr=False)
     timeout_s: float = Field(default=60, gt=0)
     max_tokens: int = Field(default=4096, gt=0)
+    context_window: int | None = Field(default=None, gt=0, strict=True)
     reasoning_effort: ReasoningEffort | None = None
 
     @field_validator("model")
@@ -278,6 +279,7 @@ class Config(BaseModel):
             "base_url": self.model.base_url,
             "timeout_s": self.model.timeout_s,
             "max_tokens": self.model.max_tokens,
+            "context_window": self.model.context_window,
             "reasoning_effort": self.model.reasoning_effort,
             "sessions_dir": str(self.runtime.sessions_dir),
             "checkpoint_file": str(self.runtime.checkpoint_file),

@@ -9,6 +9,7 @@ import os
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import anyio
 import httpx2
@@ -19,6 +20,7 @@ from fastmcp.client.transports import StdioTransport, StreamableHttpTransport
 from fastmcp.exceptions import ClientError
 from langchain_core._api import LangChainBetaWarning
 from langchain_core.tools import BaseTool, ToolException
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from mcp import MCPError
 from mcp.client import InputRequiredRoundsExceededError
 from pydantic import ValidationError
@@ -39,7 +41,7 @@ class MCPEntry:
 
 @dataclass(frozen=True)
 class MCPCatalog:
-    record: dict[str, str]
+    record: dict[str, Any]
     entries: dict[str, MCPEntry]
 
 
@@ -150,7 +152,7 @@ class MCPRegistry:
 
         return original.model_copy(update={"name": name, "coroutine": invoke, "handle_tool_error": handle_error})
 
-    async def _load(self, name: str, expected: dict[str, str] | None = None) -> MCPCatalog:
+    async def _load(self, name: str, expected: dict[str, Any] | None = None) -> MCPCatalog:
         async with self._locks[name]:
             cached = self.catalogs.get(name)
             if cached is not None:
@@ -180,7 +182,8 @@ class MCPRegistry:
                                     "description": original.description, "args_schema": schema})
                 entries[alias] = MCPEntry(name, original.name, self._tool_copy(original, alias))
             record = {"config_digest": self._config_digest(name),
-                      "catalog_digest": _digest(sorted(definitions, key=lambda item: item["name"]))}
+                      "catalog_digest": _digest(sorted(definitions, key=lambda item: item["name"])),
+                      "tool_schemas": [convert_to_openai_tool(entries[alias].tool) for alias in sorted(entries)]}
             if expected is not None and record != expected:
                 raise MCPRecoveryError(f"mcp_catalog_mismatch: {name}; create a new session")
             catalog = MCPCatalog(record, entries)
@@ -188,12 +191,27 @@ class MCPRegistry:
             self.catalogs[name] = catalog
             return catalog
 
-    async def ensure_loaded(self, state) -> None:
+    def saved_tools(self, state) -> list[dict[str, Any]]:
+        """Return enabled, checkpointed model schemas without contacting servers."""
+        self.validate_connections(state)
+        schemas = []
+        for name, record in state.get("mcp_connections", {}).items():
+            tools = record.get("tool_schemas")
+            if not isinstance(tools, list) or any(not isinstance(item, dict) for item in tools):
+                raise MCPRecoveryError(f"mcp_catalog_missing: {name}; create a new session")
+            schemas.extend(tools)
+        return schemas
+
+    def validate_connections(self, state) -> None:
         records = state.get("mcp_connections", {})
         # Validate *all* configuration before connecting to any of the saved servers.
         for name, record in records.items():
             if name not in self.config.servers or self._config_digest(name) != record["config_digest"]:
                 raise MCPRecoveryError(f"mcp_config_mismatch: {name}; restore the configuration or create a new session")
+
+    async def ensure_loaded(self, state) -> None:
+        self.validate_connections(state)
+        records = state.get("mcp_connections", {})
         for name, record in records.items():
             try:
                 await self._load(name, record)

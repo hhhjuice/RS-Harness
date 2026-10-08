@@ -81,6 +81,60 @@ def test_empty_or_exit_pipe_input_leaves_no_session(config, tmp_path, text):
     assert SessionCatalog.list(config) == []
 
 
+def test_context_without_session_and_invalid_arguments(config, tmp_path, monkeypatch):
+    from rs_harness import cli
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("/context must not start a model call or create a session")
+    monkeypatch.setattr(cli, "ask", forbidden)
+    monkeypatch.setattr(cli, "create_session", forbidden)
+    result = CliRunner().invoke(app, ["--config", str(tmp_path / "config.toml")],
+                                input="/context\n/context extra\n/help\n/quit\n")
+    assert result.exit_code == 0, result.output
+    assert "No session" in result.stdout and "/context    show context usage" in result.stdout
+    assert "Usage: /context" in result.stderr
+    assert not config.runtime.sessions_dir.exists()
+
+
+def test_context_does_not_enter_history_or_call_model(config, tmp_path, monkeypatch):
+    from langchain_core.messages import AIMessage
+    from rs_harness import application, cli
+    from tests.models import ScriptedModel
+
+    model = ScriptedModel([AIMessage(content="First answer"), AIMessage(content="Second answer")])
+    async def ask_with_model(config, session_id, message, **kwargs):
+        return await application.ask(config, session_id, message, model=model, **kwargs)
+    monkeypatch.setattr(cli, "ask", ask_with_model)
+    result = CliRunner().invoke(app, ["--config", str(tmp_path / "config.toml")],
+                                input="Hello\n/context\n/context\nNext\n/quit\n")
+    assert result.exit_code == 0, result.output
+    assert result.stdout.count("Context · test-model") == 2
+    assert "Set model.context_window" in result.stdout
+    assert "\x1b" not in result.stdout
+    assert model.call_count == 2
+    assert all("/context" not in str(message.content) for message in model.inputs[-1])
+
+
+def test_context_error_keeps_interactive_loop(config, tmp_path, monkeypatch):
+    from langchain_core.messages import AIMessage
+    from rs_harness import application, cli
+    from tests.models import ScriptedModel
+
+    model = ScriptedModel([AIMessage(content="Answer")])
+    async def ask_with_model(config, session_id, message, **kwargs):
+        return await application.ask(config, session_id, message, model=model, **kwargs)
+    async def failed_inspection(*args):
+        raise ConfigError("Cannot inspect this context")
+    monkeypatch.setattr(cli, "ask", ask_with_model)
+    monkeypatch.setattr(cli, "get_context_usage", failed_inspection)
+    result = CliRunner().invoke(app, ["--config", str(tmp_path / "config.toml")],
+                                input="Hello\n/context\n/help\n/quit\n")
+    assert result.exit_code == 0, result.output
+    assert "Cannot inspect this context" in result.stderr
+    assert "/context    show context usage" in result.stdout
+    assert model.call_count == 1
+
+
 def test_root_help_lists_all_commands_and_options_without_config(tmp_path, monkeypatch):
     from rs_harness import cli
 
@@ -139,7 +193,7 @@ def test_interactive_help_lists_only_interactive_commands(tmp_path, config, monk
     )
 
     assert result.exit_code == 0, result.output
-    for command in ("/help", "/status", "/skill", "/mcp", "/reasoning", "/close", "/quit", "/exit"):
+    for command in ("/help", "/status", "/context", "/skill", "/mcp", "/reasoning", "/close", "/quit", "/exit"):
         assert any(line.startswith(f"{command} ") for line in result.stdout.splitlines()), command
     assert "/reasoning [none|minimal|low|medium|high|xhigh|max|default]" in result.output
     assert "/skill      show installed skills" in result.output

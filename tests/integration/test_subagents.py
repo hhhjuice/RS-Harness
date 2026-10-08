@@ -71,7 +71,8 @@ def test_factories_use_separate_middleware_and_inherited_child_checkpointer(conf
     assert child["name"] == "rsh_worker"
     assert len(child["tools"]) == 6 and len(parent["tools"]) == 7
     assert "delegate_task" not in {tool.name for tool in child["tools"]}
-    assert all(a is not b for a, b in zip(child["middleware"], [m for m in parent["middleware"] if m.name not in {"SubagentBatchMiddleware", "PermissionMiddleware", "MCPMiddleware"}], strict=True))
+    assert all(a is not b for a, b in zip(child["middleware"], [m for m in parent["middleware"] if m.name not in {"SubagentBatchMiddleware", "PermissionMiddleware", "MCPMiddleware", "ContextUsageMiddleware"}], strict=True))
+    assert "ContextUsageMiddleware" not in {m.name for m in child["middleware"]}
     assert not {"PermissionMiddleware", "MCPMiddleware"} & {m.name for m in child["middleware"]}
     assert {"PermissionMiddleware", "MCPMiddleware"} <= {m.name for m in parent["middleware"]}
     assert next(m for m in child["middleware"] if m.name == "ToolDenyMiddleware").allow_approval is False

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Annotated, Sequence
@@ -19,9 +20,11 @@ from prompt_toolkit.styles import Style
 from rich.markup import escape
 
 from . import __version__
-from .application import ApprovalStatus, InteractionResult, ask, create_session, get_configured_mcp, get_pending_approvals, resume
+from .application import ApprovalStatus, InteractionResult, ask, create_session, get_configured_mcp, get_context_usage, get_pending_approvals, resume
 from .config import REASONING_EFFORTS, Config, ConfigError, save_reasoning_effort
+from .context_display import print_context_usage
 from .inputs import InputError, build_human_message
+from .mcp import MCPRecoveryError
 from .progress import CliProgress
 from .sessions.catalog import SessionBusy, SessionCatalog, SessionError
 from .skills import SkillLoader
@@ -34,6 +37,7 @@ REASONING_USAGE = "/reasoning [none|minimal|low|medium|high|xhigh|max|default]"
 INTERACTIVE_HELP = (
     "/help       show this help\n"
     "/status     show session status\n"
+    "/context    show context usage\n"
     "/skill      show installed skills\n"
     "/mcp        show configured MCP servers and tools\n"
     "/reasoning  show or set reasoning effort\n"
@@ -347,6 +351,17 @@ async def _interactive(config_path: Path, *, session_id: str | None, workdir: Pa
             break
         if command == "/help":
             typer.echo(INTERACTIVE_HELP)
+            continue
+        if command.split(maxsplit=1)[0] == "/context":
+            if command != "/context":
+                typer.echo("Usage: /context", err=True)
+            elif session is None:
+                typer.echo("No session")
+            else:
+                try:
+                    print_context_usage(await get_context_usage(config, session.session_id))
+                except (ConfigError, SessionError, MCPRecoveryError, OSError, sqlite3.Error) as exc:
+                    typer.echo(f"Error: {exc}", err=True)
             continue
         if command.split(maxsplit=1)[0] == "/skill":
             if command != "/skill":

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rs-harness"
-version = "0.0.8"
+version = "0.0.9"
 description = "A LangChain-based agent harness with persistent sessions"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -17,6 +17,7 @@ dependencies = [
     "pydantic>=2.7,<3",
     "pyyaml>=6,<7",
     "prompt-toolkit>=3.0.52,<4",
+    "rich>=13,<16",
     "tomlkit>=0.13,<1",
     "typer>=0.12,<1",
 ]

@@ -16,6 +16,7 @@ from langchain_core.tools import ToolException
 from openai import APIConnectionError, APITimeoutError, RateLimitError
 
 from ..config import Config, ResolvedSubagent, SUBAGENT_TOOLS
+from ..context_usage import CONTEXT_SOURCE
 from ..inputs import InputError, validate_image_messages
 from ..mcp import MCPRegistry
 from ..skills import SkillLoader
@@ -162,7 +163,7 @@ def _project_image_tool_results(messages: list[BaseMessage]) -> list[BaseMessage
     pending = []
     for message in messages:
         if not isinstance(message, ToolMessage) and pending:
-            projected.append(HumanMessage(content_blocks=pending))
+            projected.append(HumanMessage(content_blocks=pending, additional_kwargs={CONTEXT_SOURCE: "tool_results"}))
             pending = []
         if (
             isinstance(message, ToolMessage) and message.name == "read_image"
@@ -177,7 +178,7 @@ def _project_image_tool_results(messages: list[BaseMessage]) -> list[BaseMessage
         else:
             projected.append(message)
     if pending:
-        projected.append(HumanMessage(content_blocks=pending))
+        projected.append(HumanMessage(content_blocks=pending, additional_kwargs={CONTEXT_SOURCE: "tool_results"}))
     return projected
 
 
@@ -224,7 +225,7 @@ class StopHookMiddleware(AgentMiddleware):
             if not isinstance(result, str):
                 raise TypeError("Stop hook must return str or None")
             if result:
-                return {"messages": [HumanMessage(content=result)], "jump_to": "model"}
+                return {"messages": [HumanMessage(content=result, additional_kwargs={CONTEXT_SOURCE: "system"})], "jump_to": "model"}
             return None
         return None
 

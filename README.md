@@ -1,10 +1,12 @@
-# RS-Harness v0.0.8
+# RS-Harness v0.0.9
 
 阶段 1 提供基于 LangChain 的 Agent、SQLite 持久多轮上下文、本地 session 元数据、运行记录和 Typer CLI。阶段 2 增加官方 AgentMiddleware 组合入口、模型调用预算和运行时 context。阶段 3 接入五种基础工具、工具轨迹，以及本地和 URL 图片输入。阶段 4 接入条件审批、硬拒绝，以及跨进程审批恢复。阶段 5 接入官方任务规划和持久任务进度。阶段 6 接入官方 SubAgent 委派、具名角色与工具范围、可恢复失败反馈、持续追问、子代理免审批拒绝策略及静默 CLI 调用。
 
 阶段 7 增加 Skill 渐进式加载：技能集中维护在 `.agents/skills/<name>/SKILL.md`，由 LangChain middleware 展示目录摘要，Agent 按需调用 `load_skill(name)` 获取完整说明。
 
 阶段 8 增加 MCP Tools：在可选的 `[mcp.servers.<id>]` 中登记 stdio 或 Streamable HTTP 服务，主 Agent 按需调用 `connect_mcp(name)`，下一轮即可使用 `mcp__{server}__{tool}`。连接、分页发现、schema 和结果转换复用官方 `langchain.mcp.MCPAdapter`。示例见 [配置模板](.agents/example.toml)，配置为空时不增加工具或外部 I/O。
+
+阶段 9 增加 `/context` 上下文用量面板：离线读取当前主会话，按系统提示、用户消息、模型回复、工具定义、工具返回、Skill 和图片分类估算 token，用紧凑表格和进度条展示已用、总容量、剩余和占用百分比。模型提供输入用量时自动校准估算，容量支持自动识别及 `model.context_window` 覆盖。设计、接口和验收记录见 [阶段九开发文档](<./docs/v0.0.9——上下文用量面板.md>)。
 
 服务连接配置不包含 `description`：stdio 配置 `command` / `args` 等连接参数，HTTP 配置 `url`。连接前目录只展示服务 ID；连接后工具的说明和参数 schema 来自 MCP `tools/list`，由官方适配器转换。
 
@@ -59,6 +61,12 @@ uv run rsh ask --image ./sample.png --json
 `--config`、`--session-id` 和 `--workdir` 可放在子命令前后。放在子命令前时作为缺省值，子命令上的显式参数优先。
 
 `rsh --help` 展示 CLI 子命令，并说明 `rsh ask --image` 的图片输入方式及支持 `--json` 的子命令；交互 `/help` 展示交互命令清单。各子命令的完整参数可通过 `rsh COMMAND --help` 查看；`--image` 是 `ask` 的选项，须放在 `ask` 后。
+
+在交互提示符输入 `/context`，查看当前主 session 下一轮将携带的上下文。面板显示估算已用量、窗口总容量、剩余量、占用百分比和用量条，并按 System、User、Assistant、Tool schemas、Tool results、Skills 分类；有图片时增加 Images。分类百分比均以总窗口为分母，包含最新回复及工具调用参数，不是历次 API 用量的累计。达到 60% / 90% 时用量条分别变为黄色 / 红色；窄终端自动紧凑排版，重定向及 `NO_COLOR` 下不显示颜色。
+
+所有 token 数均以 `≈` 标记为估算。统计复用实际提示、工具定义和图片消息转换；Skill 包括目录、加载指引及已进入历史的正文，未加载的正文不占上下文，重复加载按实际次数计算。图片采用固定 token 估算，不统计 base64 字符，也不下载 URL。子代理只计入主会话中的委派参数和返回结果，不合并子代理内部历史。若最近一次主模型请求提供有效 `input_tokens`，则用对应请求校准估算；不包含该次输出用量或其他模型的计数。
+
+容量优先读取可选的 `[model].context_window` 正整数配置，再使用 LangChain 自带模型 profile；`max_tokens` 是输出上限，不作为上下文容量。无法识别容量时显示已用量和分类，其他指标显示 `—`，并提示 `Set model.context_window`。当前依赖的 profile 未识别 `glm-5.3-flash`，使用该模型时应按服务商支持的容量显式配置。统计命令不调用模型、执行工具、连接 MCP、创建会话或追加消息。MCP 连接时会把模型可见工具 schema 一并保存到 Checkpoint，查询只读取已启用服务的快照；此变更不迁移旧会话。`/context` 不接受参数，无 session 时显示 `No session`。
 
 `--image` 可重复使用，图片和文本组成同一条标准消息；省略文本可提交仅图片输入。新会话的相对图片路径按 `--workdir` 或当前目录解析，续聊按 session 原工作目录解析。用户明确指定的绝对图片路径可以位于工作目录外。输入无效时不会创建新会话；`ask --json` 返回 JSON，错误退出码为 1。
 
@@ -161,3 +169,5 @@ Python 调用方应在同一事件循环内连续 `await ask(...)`、`await get_
 v0.0.7 于 2026-09-27 完成 Skill 加载，初次交付通过 651 项离线回归（含新增 50 项 Skill 测试）和 4 个 `glm-5.3-flash` 真实模型场景。同日将运行资源统一到 `.agents/` 后，重新通过 655 项离线测试及原有 4 项 Skill 真实模型测试，并核对迁移前后的文件完整性。实现、权限边界和两次验收记录见 [阶段七实施文档](<./docs/v0.0.7——Skill 渐进式加载.md>) 第 13—14 节。如需让子代理使用技能，请在对应 `tools` 中加入 `load_skill`，再新建父 session。
 
 v0.0.8 于 2026-09-28 完成 MCP Tools，通过 739 项离线测试（新增 68 项 MCP 验证）及 7 个 `glm-5.3-flash` 真实模型场景。测试涵盖 stdio/HTTP、动态工具与权限、SQLite 新进程恢复、取消清理、CLI JSON、图片及主子工具隔离。测试夹具和验收命令见阶段八实施文档第 14 节。
+
+v0.0.9 于 2026-10-08 完成 `/context` 上下文用量面板，修复 Responses API 工具调用重复计数后，38 项专项测试全部通过；此前全量离线回归为 813 passed、34 deselected、7 errors，7 项错误均发生在缺少 `.agents/skills/pdf/SKILL.md` 的既有 fixture 初始化阶段。本次未运行真实模型测试，全量回归尚未全部通过。详细覆盖范围、复现命令和已知限制见阶段九开发文档第 8 节。

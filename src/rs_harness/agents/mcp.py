@@ -1,6 +1,6 @@
 """Lazy MCP tools in the existing LangChain agent loop."""
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -23,7 +23,7 @@ def merge_connections(current: dict, update: dict) -> dict:
 
 
 class MCPState(AgentState):
-    mcp_connections: Annotated[dict[str, dict[str, str]], merge_connections]
+    mcp_connections: Annotated[dict[str, dict[str, Any]], merge_connections]
 
 
 class MCPMiddleware(AgentMiddleware):
@@ -64,12 +64,16 @@ class MCPMiddleware(AgentMiddleware):
 
     async def awrap_model_call(self, request, handler):
         await self.registry.ensure_loaded(request.state)
+        tools = [entry.tool for entry in self.registry.entries(request.state).values()]
+        return await handler(self.with_catalog(request, tools))
+
+    def with_catalog(self, request, tools):
+        """Pure request projection shared with offline context inspection."""
         if not self.registry.config.servers:
-            return await handler(request)
+            return request
         system = request.system_message or SystemMessage(content="")
         content = [*system.content_blocks, {"type": "text", "text": self.catalog_prompt}]
-        tools = [*request.tools, *(entry.tool for entry in self.registry.entries(request.state).values())]
-        return await handler(request.override(tools=tools, system_message=system.model_copy(update={"content": content})))
+        return request.override(tools=[*request.tools, *tools], system_message=system.model_copy(update={"content": content}))
 
     async def awrap_tool_call(self, request, handler):
         await self.registry.ensure_loaded(request.state)
