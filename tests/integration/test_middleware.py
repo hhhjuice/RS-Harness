@@ -388,7 +388,7 @@ def test_production_agent_passes_configured_reasoning_effort(config, monkeypatch
         captured.update(kwargs)
         return object()
 
-    monkeypatch.setattr("langchain_openai.ChatOpenAI", fake_chat_openai)
+    monkeypatch.setattr("rs_harness.models.ReasoningChatOpenAI", fake_chat_openai)
     monkeypatch.setattr("langchain.agents.create_agent", lambda **kwargs: kwargs)
     configured = config.model_copy(update={
         "model": config.model.model_copy(update={"reasoning_effort": effort}),
@@ -399,6 +399,8 @@ def test_production_agent_passes_configured_reasoning_effort(config, monkeypatch
     assert captured.get("reasoning_effort") == effort
     assert ("reasoning_effort" in captured) == (effort is not None)
     assert "reasoning" not in captured
+    assert captured["streaming"] is True
+    assert captured["stream_usage"] is True
 
 
 @pytest.mark.parametrize("effort", [None, "none", "max"])

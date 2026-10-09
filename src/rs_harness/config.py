@@ -40,6 +40,7 @@ class ModelConfig(BaseModel):
     max_tokens: int = Field(default=4096, gt=0)
     context_window: int | None = Field(default=None, gt=0, strict=True)
     reasoning_effort: ReasoningEffort | None = None
+    stream_usage: bool = Field(default=True, strict=True)
 
     @field_validator("model")
     @classmethod
@@ -281,6 +282,7 @@ class Config(BaseModel):
             "max_tokens": self.model.max_tokens,
             "context_window": self.model.context_window,
             "reasoning_effort": self.model.reasoning_effort,
+            "stream_usage": self.model.stream_usage,
             "sessions_dir": str(self.runtime.sessions_dir),
             "checkpoint_file": str(self.runtime.checkpoint_file),
             "system_prompt_file": str(self.runtime.system_prompt_file),

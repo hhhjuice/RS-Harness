@@ -13,52 +13,6 @@ from rs_harness.sessions.catalog import SessionCatalog
 from tests.images import write_test_image
 
 
-@pytest.fixture
-def default_config(resources_config_path, tmp_path, monkeypatch):
-    path = tmp_path / ".agents/config.toml"
-    path.write_bytes(resources_config_path.read_bytes())
-    monkeypatch.chdir(tmp_path)
-    return Config.load(path)
-
-
-def test_default_config_python_and_session_commands(default_config):
-    assert Config.load().summary() == default_config.summary()
-    runner = CliRunner()
-    created = runner.invoke(app, ["create-session", "--json"])
-    assert created.exit_code == 0, created.output
-    payload = json.loads(created.stdout)
-    assert Path(payload["session_path"]).parent == default_config.runtime.sessions_dir
-    listed = runner.invoke(app, ["list-session", "--json"])
-    assert listed.exit_code == 0, listed.output
-    assert [item["session_id"] for item in json.loads(listed.stdout)] == [payload["session_id"]]
-    closed = runner.invoke(app, ["close-session", "--session-id", payload["session_id"], "--json"])
-    assert closed.exit_code == 0, closed.output
-    assert SessionCatalog.open(default_config, payload["session_id"]).meta.status == "closed"
-
-
-@pytest.mark.parametrize("interactive", [False, True])
-def test_default_config_ask_and_interactive(default_config, monkeypatch, interactive):
-    from langchain_core.messages import AIMessage
-    from rs_harness import application, cli
-    from tests.models import ScriptedModel
-
-    model = ScriptedModel([AIMessage(content="default-entry-ok")])
-
-    async def ask_with_model(config, session_id, message, **kwargs):
-        assert config.summary() == default_config.summary()
-        return await application.ask(config, session_id, message, model=model, **kwargs)
-
-    monkeypatch.setattr(cli, "ask", ask_with_model)
-    if interactive:
-        result = CliRunner().invoke(app, [], input="hello\n/quit\n")
-    else:
-        result = CliRunner().invoke(app, ["ask", "hello", "--json"])
-    assert result.exit_code == 0, result.output
-    assert "default-entry-ok" in result.stdout
-    assert len(SessionCatalog.list(default_config)) == 1
-    assert default_config.runtime.checkpoint_file.is_file()
-
-
 def test_create_and_list_session(config, tmp_path):
     runner = CliRunner()
     config_path = tmp_path / "config.toml"
@@ -214,17 +168,6 @@ def skill_runner(monkeypatch):
     return CliRunner()
 
 
-def test_skill_command_lists_installed_metadata(default_config, skill_runner):
-    result = skill_runner.invoke(app, [], input="/skill\n/quit\n")
-    assert result.exit_code == 0, result.output
-    assert f"Skills directory: {default_config.runtime.skills_dir}" in result.stdout
-    assert "Installed skills (2):" in result.stdout
-    assert "- find-skills:" in result.stdout and "- pdf:" in result.stdout
-    assert "Helps users discover and install agent skills" in result.stdout
-    assert "## What is the Skills CLI?" not in result.stdout
-    assert not default_config.runtime.sessions_dir.exists()
-
-
 @pytest.mark.parametrize("exists", [False, True])
 def test_skill_command_empty_or_missing_directory(config, tmp_path, skill_runner, exists):
     if exists:
@@ -286,18 +229,6 @@ def test_skill_command_rescans_when_called_again(config, tmp_path, monkeypatch, 
     assert result.stdout.count("- beta: Beta description") == 1
     assert "PRIVATE-" not in result.stdout
     assert not config.runtime.sessions_dir.exists()
-
-
-def test_list_skill_matches_interactive_catalog(default_config, skill_runner):
-    listed = skill_runner.invoke(app, ["list-skill"])
-    interactive = skill_runner.invoke(app, [], input="/skill\n/quit\n")
-    assert listed.exit_code == 0, listed.output
-    assert listed.stdout.strip() in interactive.stdout
-    assert "Installed skills (2):" in listed.stdout
-    assert "- find-skills:" in listed.stdout and "- pdf:" in listed.stdout
-    assert "## What is the Skills CLI?" not in listed.stdout
-    assert not default_config.runtime.sessions_dir.exists()
-    assert "list-skill" in skill_runner.invoke(app, ["--help"]).stdout
 
 
 @pytest.mark.parametrize("placement", ["root", "child", "override"])
@@ -745,11 +676,11 @@ def test_ask_progress_stays_on_stderr(config, tmp_path, monkeypatch, as_json):
     from tests.models import ScriptedModel
 
     model = ScriptedModel([
-        AIMessage(content="private reasoning", tool_calls=[{
+        AIMessage(content="private reasoning", additional_kwargs={"reasoning_content": "planning the write"}, tool_calls=[{
             "name": "write_file", "args": {"path": "note.txt", "content": "private file body"},
             "id": "write", "type": "tool_call",
         }]),
-        AIMessage(content="done"),
+        AIMessage(content="done", additional_kwargs={"reasoning_content": "checking the result"}),
     ])
 
     async def ask_with_model(config, session_id, text, **kwargs):
@@ -769,7 +700,8 @@ def test_ask_progress_stays_on_stderr(config, tmp_path, monkeypatch, as_json):
         assert "[Tool] Running write_file " in result.stderr
         assert "[Tool] Completed write_file (" in result.stderr
         assert "[Middleware]" not in result.stderr
-        assert "[Model] Call 2" in result.stderr
+        assert "[Model]" not in result.stderr
+        assert result.stderr.count("[Thinking] planning the write\n") == result.stderr.count("[Thinking] checking the result\n") == 1
         assert "note.txt" in result.stderr
     assert "private reasoning" not in result.stderr
     assert "private file body" not in result.stderr

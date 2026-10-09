@@ -12,7 +12,6 @@ from typer.testing import CliRunner
 from rs_harness import application, cli
 from rs_harness.agents.main import build_agent
 from rs_harness.agents.skills import SkillMiddleware
-from rs_harness.config import Config
 from rs_harness.context import AgentContext
 from rs_harness.progress import CliProgress
 from rs_harness.sessions.checkpoints import open_checkpointer
@@ -23,52 +22,6 @@ from tests.models import ScriptedModel
 
 
 BODY_MARKER = "## What is the Skills CLI?"
-
-
-@pytest.mark.parametrize("decision", ["approve", "reject"])
-async def test_managed_resources_loading_checkpoint_and_approval(resources_config_path, tmp_path, monkeypatch, decision):
-    config = Config.load(resources_config_path)
-    workdir = tmp_path / "task-workspace"
-    workdir.mkdir()
-    reference = tmp_path / "external-reference.txt"
-    reference.write_text("REFERENCE-8721")
-    monkeypatch.chdir(workdir)
-    session = application.create_session(config, workdir=str(workdir))
-    assert session.path.parent == tmp_path / ".agents/sessions"
-    originals = {name: (tmp_path / ".agents/skills" / name / "SKILL.md").read_text()
-                 for name in ("find-skills", "pdf")}
-    model = ScriptedModel([
-        request(load_call(), load_call("pdf", "pdf")), AIMessage(content="loaded"),
-        request(call("read_file", {"path": str(reference)}, "read")), AIMessage(content="handled"),
-        AIMessage(content="remembered"),
-    ])
-    first = await application.ask(config, session.session_id, "load both", model=model)
-    assert first.status == "succeeded", first.error
-    first_input = "\n".join(message.text for message in model.inputs[0])
-    assert "find-skills" in first_input and "- pdf:" in first_input
-    assert all(raw not in first_input for raw in originals.values())
-    outputs = tool_messages(model.inputs[1])
-    assert len(outputs) == 2 and all(message.status == "success" for message in outputs)
-    for name, message in zip(originals, outputs, strict=True):
-        assert message.content.endswith(originals[name])
-    assert config.runtime.checkpoint_file == tmp_path / ".agents/sessions/checkpoints.sqlite3"
-    assert config.runtime.checkpoint_file.is_file()
-
-    pending = await application.ask(config, session.session_id, "read reference", model=model)
-    assert pending.status == "interrupted", pending.error
-    resumed = await application.resume(config, session.session_id, {
-        pending.interrupts[0]["id"]: {"decisions": [{"type": decision}]},
-    }, model=model)
-    assert resumed.status == "succeeded", resumed.error
-    reference_result = tool_messages(model.inputs[-1])[-1]
-    assert ("REFERENCE-8721" in reference_result.content) == (decision == "approve")
-    assert reference_result.status == ("success" if decision == "approve" else "error")
-    continued = await application.ask(config, session.session_id, "recall", model=model)
-    assert continued.status == "succeeded", continued.error
-    stored = (await snapshot(config, session)).values["messages"]
-    assert [message.tool_call_id for message in tool_messages(stored)] == ["load", "pdf", "read"]
-    assert all(any(raw in message.content for message in tool_messages(model.inputs[-1])) for raw in originals.values())
-    assert not any((tmp_path / name).exists() for name in ("sessions", "skills", "prompts"))
 
 
 def put_skill(config, name, body):

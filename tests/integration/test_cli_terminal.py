@@ -135,7 +135,9 @@ model = ScriptedModel([
     AIMessage(content="", tool_calls=[
         {"name":"bash", "args":{"command":"rm first.txt # \\u001b[31m\\n"}, "id":"first", "type":"tool_call"},
         {"name":"bash", "args":{"command":"rm second.txt"}, "id":"second", "type":"tool_call"},
-    ]), AIMessage(content="permission-result"),
+    ], additional_kwargs={"reasoning_content": "reviewing removal"}),
+    AIMessage(content="permission-result", additional_kwargs={"reasoning_content": "review complete"}),
+    AIMessage(content="next-result", additional_kwargs={"reasoning_content": "next input reasoning"}),
 ])
 original_build = application.build_agent
 def build(config, *, workdir, checkpointer, model=model, subagents=None):
@@ -153,6 +155,8 @@ def begin_review(terminal_cli, tmp_path):
     displayed = read_until("Execute? [yes/no]>".encode())
     assert displayed.count("Waiting for approval (2 items)".encode()) == 1
     assert "Submitted decisions:".encode() not in displayed
+    assert displayed.count(b"reviewing removal") == 1
+    assert b"[Model]" not in displayed
     assert b"\x1b[0;33m" in displayed
     assert "Tool: bash".encode() in displayed
     assert "Operation: rm first.txt".encode() in displayed
@@ -176,8 +180,8 @@ def test_terminal_collects_all_decisions_with_no_default_approval(terminal_cli, 
     displayed = read_until(b"permission-result")
     assert displayed.count("Submitted decisions: 1 approve, 1 reject".encode()) == 1
     assert "failed".encode() not in displayed
-    assert "[Model] Call 2".encode() in displayed
-    assert "[Model] Call 1".encode() not in displayed
+    assert displayed.count(b"review complete") == 1
+    assert b"reviewing removal" not in displayed and b"[Model]" not in displayed
     read_until(b"rsh>")
     assert not (tmp_path / "first.txt").exists()
     assert (tmp_path / "second.txt").read_text() == "keep"
@@ -186,18 +190,20 @@ def test_terminal_collects_all_decisions_with_no_default_approval(terminal_cli, 
 
 
 @pytest.mark.parametrize("terminal_cli", [PERMISSION_SCRIPT], indirect=True)
-def test_terminal_model_count_continues_across_approval_and_resets_per_input(terminal_cli, tmp_path):
+def test_terminal_reasoning_continues_across_approval_and_next_input(terminal_cli, tmp_path):
     master, read_until = begin_review(terminal_cli, tmp_path)
     os.write(master, b"y\r")
     read_until("Execute? [yes/no]>".encode())
     os.write(master, b"n\r")
     interaction = read_until(b"rsh>")
     assert interaction.count("Submitted decisions: 1 approve, 1 reject".encode()) == 1
-    assert "[Model] Call 1".encode() not in interaction
-    assert interaction.index("Submitted decisions:".encode()) < interaction.index("[Model] Call 2".encode())
+    assert b"reviewing removal" not in interaction and b"[Model]" not in interaction
+    assert interaction.count(b"review complete") == 1
+    assert interaction.index(b"Submitted decisions:") < interaction.index(b"review complete")
     os.write(master, b"another\r")
-    read_until("[Model] Call 1".encode())
-    read_until(b"rsh>")
+    interaction = read_until(b"next-result") + read_until(b"rsh>")
+    assert interaction.count(b"next input reasoning") == interaction.count(b"next-result") == 1
+    assert b"review complete" not in interaction and b"[Model]" not in interaction
     os.write(master, b"/quit\r")
     assert terminal_cli[1].wait(timeout=5) == 0
 
@@ -290,8 +296,9 @@ from tests.models import ScriptedModel
 def call(name, args, id):
     return {"name": name, "args": args, "id": id, "type": "tool_call"}
 parent = ScriptedModel([
-    AIMessage(content="", tool_calls=[call("delegate_task", {"agent_id": "worker", "query": "private-query"}, "delegate")]),
-    AIMessage(content="subagent-complete"),
+    AIMessage(content="", tool_calls=[call("delegate_task", {"agent_id": "worker", "query": "private-query"}, "delegate")],
+              additional_kwargs={"reasoning_content": "parent before delegate"}),
+    AIMessage(content="subagent-complete", additional_kwargs={"reasoning_content": "parent after delegate"}),
 ])
 worker = ScriptedModel([
     AIMessage(content="", tool_calls=[
@@ -300,7 +307,7 @@ worker = ScriptedModel([
         call("write_file", {"path": "child-output", "content": "done"}, "inside"),
         call("read_file", {"path": "private-missing-file"}, "missing"),
     ]),
-    AIMessage(content="private-child-result"),
+    AIMessage(content="private-child-result", additional_kwargs={"reasoning_content": "private-child-thinking"}),
 ])
 def factory(config, **kwargs):
     kwargs.pop("model", None)
@@ -326,8 +333,8 @@ def test_terminal_subagent_is_one_silent_tool(terminal_cli, tmp_path):
     assert text.count("[Tool] Running delegate_task") == 1
     assert text.count("[Tool] Completed delegate_task (") == 1
     assert text.index("[Tool] Running delegate_task") < text.index("[Tool] Completed delegate_task (")
-    assert text.count("[Model] Call 1") == text.count("[Model] Call 2") == 1
-    assert "[Model] Call 3" not in text
+    assert text.count("parent before delegate") == text.count("parent after delegate") == 1
+    assert "[Model]" not in text
     assert (tmp_path / "child-output").read_text() == "done"
     os.write(master, b"/quit\r")
     assert process.wait(timeout=5) == 0
@@ -349,6 +356,7 @@ def test_ask_subagent_is_one_silent_tool(config, tmp_path, as_json):
     else:
         assert process.stderr.count("[Tool] Running delegate_task\n") == 1
         assert process.stderr.count("[Tool] Completed delegate_task (") == 1
-        assert process.stderr.count("[Model]") == 2
+        assert process.stderr.count("parent before delegate") == process.stderr.count("parent after delegate") == 1
+        assert "[Model]" not in process.stderr
         assert "subagent-complete" in process.stdout
     assert (tmp_path / "child-output").read_text() == "done"

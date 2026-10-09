@@ -268,7 +268,7 @@ async def test_routine_middleware_is_silent(config, tmp_path, capsys, with_image
     )
 
     assert result.status == "succeeded", result.error
-    assert capsys.readouterr().err == "[Model] Call 1\n"
+    assert capsys.readouterr().err == ""
 
 
 @pytest.mark.parametrize("failure", ["budget", "image", "stop", "tool"])
@@ -430,4 +430,4 @@ async def test_stop_hook_without_continuation_is_silent(config, tmp_path, monkey
     )
 
     assert result.status == "succeeded", result.error
-    assert capsys.readouterr().err == "[Model] Call 1\n"
+    assert capsys.readouterr().err == ""

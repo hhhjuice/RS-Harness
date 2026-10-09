@@ -182,9 +182,9 @@ def extract_answer(state: dict[str, Any]) -> str:
     if isinstance(content, list):
         parts: list[str] = []
         for block in content:
-            if isinstance(block, dict) and "text" in block:
-                parts.append(str(block["text"]))
-            else:
-                parts.append(str(block))
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") in {"text", "output_text"} and isinstance(block.get("text"), str):
+                parts.append(block["text"])
         return "".join(parts)
-    return str(content)
+    return ""

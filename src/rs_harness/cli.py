@@ -316,7 +316,7 @@ async def _interactive(config_path: Path, *, session_id: str | None, workdir: Pa
     ) if sys.stdin.isatty() and sys.stdout.isatty() else None
     pending = await get_pending_approvals(config, session.session_id) if session else None
     # progress 实例的生命周期 = 本进程内一次用户输入的交互链（ask + 其引发的各轮审批 resume），
-    # 模型调用计数因此随输入重置、跨审批 resume 连续
+    # 审批恢复复用错误去重状态；各次模型输出在结束或中断时收尾。
     progress: CliProgress | None = None
     while True:
         if pending is not None and pending.interrupts:

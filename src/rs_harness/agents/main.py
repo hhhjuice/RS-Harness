@@ -84,19 +84,21 @@ def build_agent(
     subagents: tuple[ResolvedSubagent, ...] | None = None,
 ) -> Any:
     if model is None:
-        from langchain_openai import ChatOpenAI
+        from ..models import ReasoningChatOpenAI
 
         kwargs: dict[str, Any] = {
             "model": config.model.model,
             "api_key": config.api_key(),
             "timeout": config.model.timeout_s,
             "max_tokens": config.model.max_tokens,
+            "streaming": True,
+            "stream_usage": config.model.stream_usage,
         }
         if config.model.base_url:
             kwargs["base_url"] = config.model.base_url
         if config.model.reasoning_effort is not None:
             kwargs["reasoning_effort"] = config.model.reasoning_effort
-        model = ChatOpenAI(**kwargs)
+        model = ReasoningChatOpenAI(**kwargs)
 
     from langchain.agents import create_agent
 

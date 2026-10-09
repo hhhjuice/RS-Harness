@@ -282,7 +282,7 @@ async def test_parallel_child_denials_preserve_allowed_siblings(config, tmp_path
     assert not (tmp_path / "a").exists() and not (tmp_path / "b").exists()
     output = capsys.readouterr().err
     assert output.count("[Tool] Completed delegate_task (") == 2
-    assert output.count("[Model]") == 2
+    assert "[Model]" not in output
     assert not any(marker in output for marker in ("[SubAgent", "[Approval]", "[Middleware]", "write_file"))
     assert not progress._hidden_runs and not progress._tools and not progress._middleware
     assert len(tool_messages(parent.inputs[-1])) == 2
@@ -466,7 +466,7 @@ async def test_official_run_tree_retains_hidden_child_todos(config, tmp_path, mo
     assert result.status == "succeeded", result.error
     output = capsys.readouterr().err
     assert "[SubAgent" not in output and "[Todo]" not in output
-    assert output.count("[Tool] Completed delegate_task (") == 1 and output.count("[Model]") == 2
+    assert output.count("[Tool] Completed delegate_task (") == 1 and "[Model]" not in output
     assert "private task text" not in output and "parent context" not in output
     assert not progress._hidden_runs
     rows = records(session)

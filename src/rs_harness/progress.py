@@ -14,7 +14,7 @@ from uuid import UUID
 
 import typer
 from langchain_core.callbacks import AsyncCallbackHandler
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
 from pydantic import ValidationError
@@ -91,6 +91,34 @@ def _count(value: int, noun: str) -> str:
     return f"{value} {noun}" if value == 1 else f"{value} {noun}s"
 
 
+def _reasoning_text(message: Any) -> str:
+    if not isinstance(message, AIMessage):
+        return ""
+    parts = []
+    if isinstance(message.content, list):
+        for block in message.content:
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("type")
+            if kind not in {"reasoning", "thinking"}:
+                continue
+            text = block.get(kind, block.get("text"))
+            if isinstance(text, str):
+                parts.append(text)
+            elif kind == "reasoning" and isinstance(block.get("summary"), list):
+                parts.extend(
+                    part["text"] for part in block["summary"]
+                    if isinstance(part, dict) and isinstance(part.get("text"), str)
+                )
+    if text := "".join(parts):
+        return text
+    for key in ("reasoning_content", "reasoning"):
+        text = message.additional_kwargs.get(key)
+        if isinstance(text, str) and text:
+            return text
+    return ""
+
+
 class CliProgress(AsyncCallbackHandler):
     raise_error = False
     run_inline = True
@@ -99,16 +127,53 @@ class CliProgress(AsyncCallbackHandler):
         self._tools: dict[UUID, tuple[str, float, str]] = {}
         self._middleware: dict[UUID, str] = {}
         self._hidden_runs: set[UUID] = set()
-        self._model_count = 0
+        self._model_runs: dict[UUID, bool] = {}
+        self._reasoning_line: UUID | None = None
         self._reported_errors: set[tuple[str, str]] = set()
 
     def _write(self, message: str, *, plan: bool = False) -> bool:
+        self._finish_reasoning_line()
         try:
             color = getattr(sys.stderr, "isatty", lambda: False)()
             typer.secho(message, file=sys.stderr, fg="yellow" if plan else "bright_black", color=color)
         except (OSError, ValueError):
             return False
         return True
+
+    def _finish_reasoning_line(self) -> None:
+        if self._reasoning_line is not None:
+            self._reasoning_line = None
+            try:
+                typer.echo(file=sys.stderr)
+            except (OSError, ValueError):
+                pass
+
+    def _write_reasoning(self, run_id: UUID, text: str) -> None:
+        if not text:
+            return
+        if not self._model_runs[run_id]:
+            text = f"[Thinking] {text}"
+        # Mark even failed writes as consumed: on_llm_end must not replay them.
+        self._model_runs[run_id] = True
+        if self._reasoning_line is not None and self._reasoning_line != run_id:
+            self._finish_reasoning_line()
+        text = "".join(
+            f"\\u{ord(char):04x}" if char not in "\n\t" and unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"} else char
+            for char in text
+        )
+        self._reasoning_line = None if text.endswith("\n") else run_id
+        try:
+            color = getattr(sys.stderr, "isatty", lambda: False)()
+            typer.secho(text, file=sys.stderr, fg="bright_black", color=color, nl=False)
+            sys.stderr.flush()
+        except (OSError, ValueError):
+            pass
+
+    def _finish_model_run(self, run_id: UUID) -> None:
+        if self._reasoning_line == run_id:
+            self._finish_reasoning_line()
+        self._model_runs.pop(run_id, None)
+        self._hidden_runs.discard(run_id)
 
     def has_reported_error(self, error: dict[str, str] | None) -> bool:
         return bool(error and (error["type"], error["message"]) in self._reported_errors)
@@ -117,11 +182,25 @@ class CliProgress(AsyncCallbackHandler):
         if self._write(f"{prefix} ({_preview(kind)}): {_preview(message if detail is None else detail)}", plan=plan):
             self._reported_errors.add((kind, message))
 
-    async def on_chat_model_start(self, serialized, messages, **kwargs: Any) -> None:
+    async def on_chat_model_start(self, serialized, messages, *, run_id: UUID, **kwargs: Any) -> None:
         if kwargs.get("parent_run_id") in self._hidden_runs:
+            self._hidden_runs.add(run_id)
             return
-        self._model_count += 1
-        self._write(f"[Model] Call {self._model_count}")
+        self._model_runs[run_id] = False
+
+    async def on_llm_new_token(self, token: str, *, run_id: UUID, chunk=None, **kwargs: Any) -> None:
+        if run_id in self._model_runs:
+            self._write_reasoning(run_id, _reasoning_text(getattr(chunk, "message", None)))
+
+    async def on_llm_end(self, response, *, run_id: UUID, **kwargs: Any) -> None:
+        try:
+            if self._model_runs.get(run_id) is False and response.generations and response.generations[0]:
+                self._write_reasoning(run_id, _reasoning_text(getattr(response.generations[0][0], "message", None)))
+        finally:
+            self._finish_model_run(run_id)
+
+    async def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
+        self._finish_model_run(run_id)
 
     async def on_chain_start(self, serialized, inputs, *, run_id: UUID, **kwargs: Any) -> None:
         name = kwargs.get("name") or (serialized or {}).get("name", "")
@@ -139,6 +218,8 @@ class CliProgress(AsyncCallbackHandler):
         name = self._middleware.pop(run_id, None)
         self._hidden_runs.discard(run_id)
         if kwargs.get("parent_run_id") is None:
+            self._finish_reasoning_line()
+            self._model_runs.clear()
             self._hidden_runs.clear()
             self._tools.clear()
             self._middleware.clear()
@@ -159,6 +240,8 @@ class CliProgress(AsyncCallbackHandler):
         name = self._middleware.pop(run_id, None)
         self._hidden_runs.discard(run_id)
         if kwargs.get("parent_run_id") is None:
+            self._finish_reasoning_line()
+            self._model_runs.clear()
             self._hidden_runs.clear()
             self._tools.clear()
             self._middleware.clear()

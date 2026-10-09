@@ -2,16 +2,29 @@ import base64
 import hashlib
 
 import pytest
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from rs_harness.inputs import (
     InputError,
     build_human_message,
+    extract_answer,
     summarize_message_content,
     validate_human_message,
     validate_image_messages,
 )
 from tests.images import write_test_image
+
+
+@pytest.mark.parametrize(("content", "answer"), [
+    ("plain answer", "plain answer"),
+    ([{"type": "reasoning", "reasoning": "private"}, {"type": "text", "text": "answer"}], "answer"),
+    ([{"type": "thinking", "text": "private"}, {"type": "text", "text": "first"}, " second"], "first second"),
+    ([{"type": "reasoning", "summary": [{"text": "private"}]}, {"type": "output_text", "text": "answer"}], "answer"),
+    ([{"type": "reasoning", "reasoning": "private"}, {"type": "image", "url": "private"}], ""),
+])
+def test_extract_answer_only_returns_answer_text(content, answer):
+    message = AIMessage(content=content, additional_kwargs={"reasoning_content": "private"})
+    assert extract_answer({"messages": [message]}) == answer
 
 
 def test_build_human_message_rejects_empty_input():

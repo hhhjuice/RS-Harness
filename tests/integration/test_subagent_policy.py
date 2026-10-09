@@ -63,6 +63,10 @@ async def test_child_progress_is_hidden_but_tool_and_parent_remain_visible(confi
         request(delegate("private-query"), call("write_file", {"path": "parent-artifact", "content": "kept"}, "main")),
         AIMessage(content="reported"),
     ])
+    for message in worker.responses:
+        message.additional_kwargs["reasoning_content"] = "private-child-thinking"
+    for index, message in enumerate(parent.responses):
+        message.additional_kwargs["reasoning_content"] = f"parent thought {index}"
     install_worker(monkeypatch, worker)
     session = application.create_session(config, workdir=str(tmp_path))
     progress = CliProgress()
@@ -75,7 +79,8 @@ async def test_child_progress_is_hidden_but_tool_and_parent_remain_visible(confi
     assert output.count("[Tool] Completed delegate_task (") == 1
     assert output.index("[Tool] Running delegate_task\n") < output.index("[Tool] Completed delegate_task (")
     assert output.count("[Tool] Completed write_file (") == 1
-    assert [line for line in output.splitlines() if line.startswith("[Model]")] == ["[Model] Call 1", "[Model] Call 2"]
+    assert [line for line in output.splitlines() if line.startswith("[Thinking]")] == ["[Thinking] parent thought 0", "[Thinking] parent thought 1"]
+    assert "[Model]" not in output and not progress._model_runs
     assert not progress._hidden_runs and not progress._tools and not progress._middleware
     assert any(row["event"] == "tool_start" and row["payload"]["name"] == "write_todos" for row in records(session))
     assert tool_messages(parent.inputs[-1])[0].content == "private-child-result"

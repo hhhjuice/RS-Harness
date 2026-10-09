@@ -15,6 +15,14 @@ def test_config_resolves_paths_and_prompt(config):
     assert config.summary()["max_tool_output_bytes"] == 65536
     assert config.model.reasoning_effort is None
     assert config.summary()["reasoning_effort"] is None
+    assert config.model.stream_usage is True
+    assert config.summary()["stream_usage"] is True
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true", "false"])
+def test_stream_usage_requires_boolean(value):
+    with pytest.raises(ValueError):
+        ModelConfig.model_validate({"model": "test-model", "stream_usage": value})
 
 
 @pytest.mark.parametrize("effort", REASONING_EFFORTS)

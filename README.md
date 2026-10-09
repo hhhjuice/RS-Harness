@@ -32,6 +32,8 @@ RSH 启动默认读取当前目录下的 `.agents/config.toml`，也可用 `--co
 
 可选的 `reasoning_effort` 控制模型的推理强度，取值为 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`。不配置时不向提供商发送此参数，由模型使用自身默认值；`none` 是明确请求关闭推理。交互模式中用 `/reasoning` 查看当前设置和用法，`/reasoning high` 等命令修改强度，`/reasoning default` 则删除该配置项。修改会写入当前 `--config` 指定的 TOML 文件，从下一轮模型调用生效；后续使用同一文件启动的会话也会采用新值。具体支持的档位由所选模型及兼容服务决定，不支持的值会按提供商错误返回。
 
+`[model].stream_usage` 默认为 `true`，在流式请求中要求服务返回 token 用量，供 `/context` 校准；自定义 `base_url` 同样生效。兼容服务不支持 `stream_options.include_usage` 时，可设置 `stream_usage = false`；缺少服务端用量的响应会使 `/context` 使用粗估。
+
 `[runtime].max_model_calls` 默认为 `10`，限制一次 `ainvoke` 执行段中的模型调用次数。达到预算后，下一次模型调用返回 `ModelCallLimitExceededError`；新的普通交互或审批恢复重新获得预算，不跨恢复累计。工作目录通过每次调用的 runtime context 注入 middleware 和工具，context 对象不作为消息历史保存；系统提示词保留现有工作目录说明。
 
 Agent 已接入 Stop Hook 协议，默认检查列表为空，不预设任务验收规则。在 `src/rs_harness/agents/middleware.py` 的 `build_middleware` 中，将末尾的 `StopHookMiddleware()` 改为 `StopHookMiddleware(hooks=(first_check, second_check))`，并定义或导入对应检查函数，即可集中注册；CLI、普通提问和审批恢复使用同一套注册。
@@ -121,7 +123,7 @@ Bash 使用区分大小写的字面子串规则，例如 `rm -rf /tmp/demo` 也�
 
 交互模式可连续输入多轮问题，整个交互过程共用一个异步事件循环。TTY 下普通 `rsh>` 输入提示显示为蓝色，审批输入提示显示为黄色。触发审批时显示待审批数量、工具名称和实际操作；审批阶段只接受 `y/yes` 或 `n/no`，分别对应批准或拒绝，其他输入不会改变审批状态。空输入不批准，收齐后才提交。审批期间 Ctrl+C 或 Ctrl+D 丢弃尚未提交的决定并保留暂停，之后可通过 `--session-id` 继续；普通交互阶段仍支持 `/status`、`/skill`、`/mcp`、`/close`、`/quit` 和 `/exit`。审批展示和提示写入 stderr，最终回答写入 stdout。管道或重定向模式遇到待审即以 2 退出，不消费后续输入作为批准。
 
-交互模式和普通 `ask` 会实时显示主代理模型调用与普通工具开始、完成/失败通知。`delegate_task` 只显示普通工具级开始、完成/失败通知，不展开 query、子回复或内部错误详情；其内部模型、工具、Todo 和中间件事件均不打印。工具开始执行时输出 `[Tool] Running <tool>` 及操作摘要；成功后输出 `[Tool] Completed <tool> (<elapsed>s)`，失败时补充 `[Tool] Failed <tool> (<elapsed>s)` 和错误信息。结束通知复用开始时的操作摘要，摘要先脱敏再截断，最多 160 个字符，长操作的差异可能被截断。写入/编辑正文只显示长度，成功结果正文不展开。命令摘要隐藏敏感变量赋值和 Authorization 头，无法确定敏感值边界时隐藏整条命令摘要。运行提示默认使用英文。中间件默认静默，仅在以下情况通知：
+交互模式和普通 `ask` 会实时显示主代理模型推理内容与普通工具开始、完成/失败通知。`delegate_task` 只显示普通工具级开始、完成/失败通知，不展开 query、子回复或内部错误详情；其内部模型、工具、Todo 和中间件事件均不打印。工具开始执行时输出 `[Tool] Running <tool>` 及操作摘要；成功后输出 `[Tool] Completed <tool> (<elapsed>s)`，失败时补充 `[Tool] Failed <tool> (<elapsed>s)` 和错误信息。结束通知复用开始时的操作摘要，摘要先脱敏再截断，最多 160 个字符，长操作的差异可能被截断。写入/编辑正文只显示长度，成功结果正文不展开。命令摘要隐藏敏感变量赋值和 Authorization 头，无法确定敏感值边界时隐藏整条命令摘要。运行提示默认使用英文。中间件默认静默，仅在以下情况通知：
 
 | 中间件                       | 显示内容                                                                                           |
 | ---------------------------- | -------------------------------------------------------------------------------------------------- |
@@ -133,7 +135,7 @@ Bash 使用区分大小写的字面子串规则，例如 `rm -rf /tmp/demo` 也�
 | `TodoListMiddleware`       | 计划更新、清空或更新被拒绝；展开全部 Todo 项，不额外打印普通`write_todos` 工具行                 |
 | `StopHookMiddleware`       | 要求继续执行，或检查异常                                                                           |
 
-人工拒绝表示未执行，待审批、取消及框架中断不打印为工具失败。已经显示过原因的错误若终止本轮，最终仅补充 `This run failed.`。摘要写入 stderr，TTY 下带颜色，重定向时为纯文本；`--json` 关闭这些通知，保持 stdout 为单个 JSON 对象。展示依据实际回调和状态，不输出模型内部思维、完整消息历史或图片数据。
+人工拒绝表示未执行，待审批、取消及框架中断不打印为工具失败。已经显示过原因的错误若终止本轮，最终仅补充 `This run failed.`。摘要写入 stderr，TTY 下带颜色，重定向时为纯文本；`--json` 关闭这些通知，保持 stdout 为单个 JSON 对象。展示依据实际回调和状态，只显示接口返回的推理文本，不展开完整消息历史或图片数据。
 
 Python 调用默认不输出运行摘要；可向 `ask`/`resume` 传入 `callbacks=[...]` 接入 LangChain callback handler。CLI 展示与 `trajectory.jsonl` 记录各自独立，控制台写入失败不会重试工具或改变 Agent 的结果。
 
@@ -146,7 +148,7 @@ Python 调用默认不输出运行摘要；可向 `ask`/`resume` 传入 `callbac
 [Tool] Completed bash (0.03s) {"command":"ls -la /Users/hgz/WorkSpace/RS-Harness/ 2>&1 | head -40"}
 ```
 
-交互模式的模型调用计数随新输入重置，同一输入引发的主代理审批恢复继续累计；独立启动的 `ask` 命令保持同一输入的审批链路并从 1 计数。可见计数只统计主代理，子模型预算仍由各自中间件管理。CLI 根据官方 run_id/parent_run_id 隐藏委派调用的后代事件，不再打印 `[SubAgent …]` 前缀；完成、失败或取消后清理跟踪状态。子运行名称及完整关联继续写入轨迹日志。
+模型调用不再显示 `[Model] Call N`。主代理返回的 `reasoning_content`、字符串形式的 `reasoning` 或 reasoning/thinking 内容块会原样保留文字和换行，逐片刷新到 stderr，每次模型调用的首段推理前添加一次 `[Thinking]` 标签，不显示调用编号、不截断正文；终端控制字符转义显示。没有推理文本时保持静默，普通回复不作为推理展示，最终回答仅在 stdout 输出一次。非流式模型仅在响应结束后补打推理内容，已流式显示的内容不会重复打印。`--json` 关闭推理输出；主、子模型的调用预算仍由各自中间件管理。CLI 根据官方 run_id/parent_run_id 隐藏委派调用的后代事件，不再打印 `[SubAgent …]` 前缀；完成、失败或取消后清理跟踪状态。子运行名称及完整关联继续写入轨迹日志。
 
 终端输入支持中文编辑：左右键移动光标，Backspace/Delete 删除字符，Home/End 移至行首/行尾，上下键浏览本次运行的输入历史。历史仅保存在内存中；Enter 提交问题，输入提示符处 Ctrl+C 或空行 Ctrl+D 退出并保留会话。重定向或管道输入使用普通文本读取。
 
