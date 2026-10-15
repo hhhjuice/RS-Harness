@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Annotated, Literal, Self, get_args
 
 import tomlkit
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, HttpUrl, SecretStr, field_validator
 
 
 class ConfigError(ValueError):
@@ -73,6 +73,38 @@ class RuntimeConfig(BaseModel):
 
 SubagentTool = Literal["read_file", "write_file", "edit_file", "glob", "bash", "read_image", "write_todos", "load_skill"]
 SUBAGENT_TOOLS = get_args(SubagentTool)
+MainAgentTool = Literal[SubagentTool, "delegate_task"]
+MAIN_AGENT_TOOLS = get_args(MainAgentTool)
+
+
+def _validate_skill_selection(value: tuple[str, ...] | None) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if any(not name.strip() or name.strip() == "*" for name in value):
+        raise ValueError("skills must contain non-blank names, not '*'")
+    if len(value) != len(set(value)):
+        raise ValueError("skills must not contain duplicates")
+    return value
+
+
+SkillSelection = Annotated[
+    tuple[Annotated[str, Field(strict=True)], ...] | None,
+    AfterValidator(_validate_skill_selection),
+]
+
+
+class AgentConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    tools: tuple[MainAgentTool, ...] = MAIN_AGENT_TOOLS
+    skills: SkillSelection = None
+
+    @field_validator("tools")
+    @classmethod
+    def unique_tools(cls, value):
+        if len(value) != len(set(value)):
+            raise ValueError("tools must not contain duplicates")
+        return value
 
 
 class SubagentConfig(BaseModel):
@@ -83,6 +115,7 @@ class SubagentConfig(BaseModel):
     description: str
     system_prompt_file: Path
     tools: tuple[SubagentTool, ...]
+    skills: SkillSelection = None
     persistence: Literal["per_invocation", "per_thread"] = "per_invocation"
 
     @field_validator("name", "description")
@@ -113,7 +146,8 @@ class ResolvedSubagent(SubagentConfig):
 
 def subagents_digest(subagents: tuple[ResolvedSubagent, ...]) -> str:
     definitions = [
-        {"id": item.id, "prompt": item.system_prompt, "tools": sorted(item.tools), "persistence": item.persistence}
+        {"id": item.id, "prompt": item.system_prompt, "tools": sorted(item.tools),
+         "skills": None if item.skills is None else sorted(item.skills), "persistence": item.persistence}
         for item in sorted(subagents, key=lambda item: item.id)
     ]
     return hashlib.sha256(json.dumps(definitions, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
@@ -180,6 +214,7 @@ class Config(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     model: ModelConfig
+    agent: AgentConfig = Field(default_factory=AgentConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     subagents: tuple[SubagentConfig, ...] = ()
     mcp: MCPConfig = Field(default_factory=MCPConfig)
@@ -283,6 +318,7 @@ class Config(BaseModel):
             "context_window": self.model.context_window,
             "reasoning_effort": self.model.reasoning_effort,
             "stream_usage": self.model.stream_usage,
+            "agent": self.agent.model_dump(mode="json"),
             "sessions_dir": str(self.runtime.sessions_dir),
             "checkpoint_file": str(self.runtime.checkpoint_file),
             "system_prompt_file": str(self.runtime.system_prompt_file),

@@ -15,11 +15,11 @@ from langchain_core.runnables.config import ensure_config
 from langchain_core.tools import ToolException
 from openai import APIConnectionError, APITimeoutError, RateLimitError
 
-from ..config import Config, ResolvedSubagent, SUBAGENT_TOOLS
+from ..config import Config, ResolvedSubagent
 from ..context_usage import CONTEXT_SOURCE
 from ..inputs import InputError, validate_image_messages
 from ..mcp import MCPRegistry
-from ..skills import SkillLoader
+from ..skills import SkillCatalog
 from ..tools.filesystem import resolve_file_path
 from .skills import SkillMiddleware
 from .mcp import MCPMiddleware
@@ -231,9 +231,9 @@ class StopHookMiddleware(AgentMiddleware):
 
 
 def build_middleware(
-    config: Config, *, tools: Sequence[str] = SUBAGENT_TOOLS,
+    config: Config, *, tools: Sequence[str],
     subagents: Sequence[ResolvedSubagent] = (),
-    skills: SkillLoader | None = None,
+    skills: SkillCatalog | None = None,
     allow_approval: bool = True,
     mcp: MCPRegistry | None = None,
 ) -> list[AgentMiddleware]:

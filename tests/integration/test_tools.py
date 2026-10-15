@@ -113,7 +113,7 @@ async def test_default_async_calls_can_overlap(config):
             for name in ["one", "two"]
         ]), AIMessage(content="done"),
     ])
-    agent = create_agent(model, tools=[barrier], middleware=build_middleware(config))
+    agent = create_agent(model, tools=[barrier], middleware=build_middleware(config, tools=config.agent.tools))
     result = await agent.ainvoke({"messages": [HumanMessage("run")]})
     assert {message.tool_call_id: message.content for message in result["messages"] if isinstance(message, ToolMessage)} == {"one": "one", "two": "two"}
 
@@ -123,7 +123,7 @@ async def test_unexpected_errors_and_control_flow_are_not_converted(config, erro
     async def handler(request):
         raise error
 
-    for middleware in build_middleware(config):
+    for middleware in build_middleware(config, tools=config.agent.tools):
         if isinstance(middleware, (ToolErrorMiddleware, ToolDenyMiddleware)):
             with pytest.raises(type(error)):
                 await middleware.awrap_tool_call(SimpleNamespace(tool=None, tool_call={"name": "probe", "id": "probe"}), handler)

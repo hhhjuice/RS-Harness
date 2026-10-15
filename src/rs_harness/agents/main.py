@@ -10,7 +10,7 @@ from langchain_core.messages import SystemMessage
 
 from ..agents.middleware import ImageInputMiddleware, _project_image_tool_results, build_middleware
 from ..agents.subagent import build_delegate_tool, make_delegate_tool
-from ..config import Config, ResolvedSubagent
+from ..config import Config, MAIN_AGENT_TOOLS, ResolvedSubagent
 from ..context import AgentContext
 from ..mcp import MCPRegistry
 from ..skills import SkillLoader
@@ -57,20 +57,25 @@ def build_agent_components(
     """Assemble shared prompts/tools; model=None builds schemas without child graphs."""
     subagents = config.resolve_subagents() if subagents is None else subagents
     skills = SkillLoader(config.runtime.skills_dir)
+    main_skills = skills.select(config.agent.skills, owner="Main agent")
+    # Validate every configured role even when loading or delegation is disabled.
+    for definition in config.subagents:
+        skills.select(definition.skills, owner=f"Subagent {definition.id}")
+    if "delegate_task" not in config.agent.tools:
+        subagents = ()
     base_tools = [read_file, write_file, edit_file, glob, bash, read_image]
-    tools = list(base_tools)
+    tools = [item for item in base_tools if item.name in config.agent.tools]
     if subagents:
         tools.append(
             make_delegate_tool(subagents, {}) if model is None else build_delegate_tool(
                 config, model=model, tools=base_tools, workdir=workdir, subagents=subagents, skills=skills,
             )
         )
-    mcp = MCPRegistry(config.mcp, local_names=[*(item.name for item in base_tools),
-                      "delegate_task", "write_todos", "load_skill", "connect_mcp"],
+    mcp = MCPRegistry(config.mcp, local_names=[*MAIN_AGENT_TOOLS, "connect_mcp"],
                       max_output_bytes=config.runtime.max_tool_output_bytes)
     return AgentComponents(
         system_prompt=config.system_prompt(workdir), tools=tools,
-        middleware=build_middleware(config, subagents=subagents, skills=skills, mcp=mcp),
+        middleware=build_middleware(config, tools=config.agent.tools, subagents=subagents, skills=main_skills, mcp=mcp),
     )
 
 

@@ -266,7 +266,7 @@ async def test_conditional_tools_keep_framework_parallel_execution(config, tmp_p
 
     prefix = "rm " if requires_approval else "echo "
     model = ScriptedModel([AIMessage(content="", tool_calls=[call("bash", {"command": prefix + name}, name) for name in ("one", "two")]), AIMessage(content="done")])
-    agent = create_agent(model, tools=[barrier], middleware=build_middleware(config), checkpointer=InMemorySaver(), context_schema=AgentContext)
+    agent = create_agent(model, tools=[barrier], middleware=build_middleware(config, tools=config.agent.tools), checkpointer=InMemorySaver(), context_schema=AgentContext)
     run_config = {"configurable": {"thread_id": "parallel"}}
     context = AgentContext(str(tmp_path))
     result = await agent.ainvoke({"messages": [HumanMessage("run")]}, run_config, context=context)

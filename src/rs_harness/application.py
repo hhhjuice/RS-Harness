@@ -149,7 +149,7 @@ async def _run_interaction(
             if subagents_digest(subagents) != session.meta.subagents_digest:
                 raise SessionError(
                     "subagent_config_mismatch: Subagent definitions changed. Restore the original "
-                    "ids, prompts, tools and persistence modes, or create a new session."
+                    "ids, prompts, tools, skills and persistence modes, or create a new session."
                 )
             async with open_checkpointer(config) as checkpointer:
                 agent = build_agent(

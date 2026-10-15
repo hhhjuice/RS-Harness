@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import unicodedata
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -57,11 +58,36 @@ def _parse_skill(path: Path, content: str, directory_name: str) -> Skill:
     return Skill(name, description, path, content)
 
 
-class SkillLoader:
+@dataclass(frozen=True)
+class SkillCatalog:
+    """Read-only view of a skill snapshot, shared without rereading manifests."""
+
+    skills: Mapping[str, Skill]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "skills", MappingProxyType(dict(self.skills)))
+
+    def select(self, names: Sequence[str] | None, *, owner: str) -> SkillCatalog:
+        if names is None:
+            return self
+        selected = set(names)
+        missing = selected - self.skills.keys()
+        if missing:
+            raise ConfigError(f"{owner}: unknown skills: {', '.join(sorted(missing))}")
+        return SkillCatalog({name: skill for name, skill in self.skills.items() if name in selected})
+
+    def catalog(self) -> str:
+        return "\n".join(f"- {skill.name}: {skill.description}" for skill in self.skills.values()) or "none"
+
+    def load(self, name: str) -> Skill:
+        return self.skills[name]
+
+
+class SkillLoader(SkillCatalog):
     """Scan once per Agent build; loading by name never accesses the filesystem."""
 
     def __init__(self, root: Path):
-        self.skills = MappingProxyType(self._scan(root.expanduser().resolve()))
+        super().__init__(self._scan(root.expanduser().resolve()))
 
     @staticmethod
     def _scan(root: Path) -> dict[str, Skill]:
@@ -93,9 +119,3 @@ class SkillLoader:
                 raise ConfigError(f"Duplicate skill {skill.name!r}: {skills[skill.name].path} and {skill.path}")
             skills[skill.name] = skill
         return skills
-
-    def catalog(self) -> str:
-        return "\n".join(f"- {skill.name}: {skill.description}" for skill in self.skills.values()) or "none"
-
-    def load(self, name: str) -> Skill:
-        return self.skills[name]

@@ -26,7 +26,7 @@ def install_agent(monkeypatch, tools):
         return create_agent(
             model=model,
             tools=list(tools),
-            middleware=build_middleware(loaded_config),
+            middleware=build_middleware(loaded_config, tools=loaded_config.agent.tools),
             context_schema=AgentContext,
             checkpointer=checkpointer,
         )

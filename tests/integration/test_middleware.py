@@ -255,7 +255,7 @@ async def test_middleware_state_survives_sqlite_reopen(config):
     async with open_checkpointer(config) as saver:
         agent = _agent(
             model, tools=(), checkpointer=saver,
-            middleware=[*build_middleware(config), ProbeMiddleware("A", [])],
+            middleware=[*build_middleware(config, tools=config.agent.tools), ProbeMiddleware("A", [])],
         )
         await agent.ainvoke(
             {"messages": [HumanMessage("first")]},
@@ -265,7 +265,7 @@ async def test_middleware_state_survives_sqlite_reopen(config):
     async with open_checkpointer(config) as saver:
         agent = _agent(
             model, tools=(), checkpointer=saver,
-            middleware=[*build_middleware(config), ProbeMiddleware("A", [])],
+            middleware=[*build_middleware(config, tools=config.agent.tools), ProbeMiddleware("A", [])],
         )
         snapshot = await agent.aget_state(run_config)
         assert snapshot.values["probe_count"] == 1
@@ -481,7 +481,7 @@ async def test_application_records_budget_failure_and_allows_next_interaction(co
     def fake_build_agent(config, *, workdir, checkpointer=None, model=None, subagents=None):
         return _agent(
             model,
-            middleware=build_middleware(config),
+            middleware=build_middleware(config, tools=config.agent.tools),
             checkpointer=checkpointer,
         )
 
@@ -520,7 +520,7 @@ def test_cli_budget_failure_and_next_interaction(config, monkeypatch, tmp_path, 
     session = create_session(config)
 
     def build_test_agent(loaded_config, *, workdir, checkpointer=None, model=None, subagents=None):
-        return _agent(model, middleware=build_middleware(loaded_config), checkpointer=checkpointer)
+        return _agent(model, middleware=build_middleware(loaded_config, tools=loaded_config.agent.tools), checkpointer=checkpointer)
 
     async def ask_with_model(loaded_config, session_id, text, **kwargs):
         return await ask(loaded_config, session_id, text, model=model, **kwargs)

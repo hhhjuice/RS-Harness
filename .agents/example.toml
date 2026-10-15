@@ -7,6 +7,28 @@ max_tokens = 4096
 # context_window = 128000 # 可选覆盖模型上下文容量；max_tokens 仅控制输出上限
 # reasoning_effort = "high" # none|minimal|low|medium|high|xhigh|max
 
+# 主 Agent 默认启用全部普通内置工具；省略 [agent] 或 tools 也表示全部启用。
+# 显式列表仅允许选中项；tools = [] 关闭全部普通内置工具。
+# 例如 tools = ["read_file", "glob", "read_image"] 仅开放读取和查找。
+# connect_mcp 和远端 MCP 工具独立可用，不填入此列表；显式 confirm 仍需审批。
+# delegate_task 还需配置子 Agent；没有子定义时跳过。子 Agent 使用各自 tools。
+[agent]
+tools = [
+  "read_file",
+  "write_file",
+  "edit_file",
+  "glob",
+  "bash",
+  "read_image",
+  "write_todos",
+  "load_skill",
+  "delegate_task",
+]
+# skills 省略时开放全部已安装技能；显式列表只开放所选标准名称。
+# skills = ["find-skills"]
+# skills = [] # 禁用全部 Skill；是否提供 load_skill 仍由 tools 决定。
+# 未安装或无法识别的名称在构图前报错；主子 Agent 各自独立配置。
+
 [runtime]
 sessions_dir = "../.agents/sessions"
 system_prompt_file = "../.agents/prompts/system.md"
@@ -24,6 +46,9 @@ name = "Researcher"
 description = "读取工作区内容、调研需求与现有实现，梳理约束、证据和验收标准，支持持续追问。"
 system_prompt_file = "../.agents/prompts/subagents/researcher.md"
 tools = ["read_file", "glob", "read_image", "write_todos", "load_skill"]
+# skills 默认全部可用，不继承主 Agent 的限制；使用标准名称选择。
+# skills = ["find-skills"]
+# skills = [] # 关闭该子 Agent 的全部 Skill。
 persistence = "per_thread"
 
 [[subagents]]
@@ -32,6 +57,9 @@ name = "Engineer"
 description = "根据明确需求与调研结论在工作区完成具体实现，修改相关文件并验证结果。"
 system_prompt_file = "../.agents/prompts/subagents/engineer.md"
 tools = ["read_file", "write_file", "edit_file", "glob", "bash", "read_image", "write_todos", "load_skill"]
+# skills 默认全部可用，不继承主 Agent 的限制；使用标准名称选择。
+# skills = ["find-skills"]
+# skills = [] # 关闭该子 Agent 的全部 Skill。
 persistence = "per_invocation"
 
 # 可选 MCP 服务：取消注释并替换为实际服务。只向主 Agent 提供工具。

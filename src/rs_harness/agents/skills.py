@@ -6,11 +6,11 @@ from langchain_core.messages import SystemMessage
 from langchain_core.tools import ToolException
 
 from ..context import AgentContext
-from ..skills import SkillLoader
+from ..skills import SkillCatalog
 
 
 class SkillMiddleware(AgentMiddleware):
-    def __init__(self, skills: SkillLoader):
+    def __init__(self, skills: SkillCatalog):
         self.skills_prompt = (
             f"\n\n## Available Skills\n\n{skills.catalog()}\n\n"
             "This catalog lists all registered skills for this Agent. Choose by description "

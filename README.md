@@ -78,23 +78,44 @@ uv run rsh ask --image ./sample.png --json
 
 已验证 `api.deepseek.com` 的 `deepseek-flash` 工具和视觉输入。[该服务的视觉限制](https://api-docs.deepseek.com/guides/vision)包括：单张内联图片 32 MiB、完整请求体 48 MiB、每请求最多 600 张图、无 file_id 时图片总计 64 MiB、URL 最长 8192 字符。本地图片统一受 harness 级 32 MiB 读取上限保护；DeepSeek 附加限制在读取/编码前及每次模型调用（含历史）时检查。完整请求 JSON 开销、远程下载、图片解码及尺寸限制由 provider 最终验证。该服务的单边尺寸上限为 8192 像素，15 张图起为 4096 像素；本地不缩放或转码。其他服务不套用 DeepSeek 附加限制，支持情况及更严格的限制由相应 provider 决定；失败会明确返回。
 
-生产 Agent 提供 `read_file/read_image/write_file/edit_file/glob/bash`。文件路径按 session workdir 解析并跟随符号链接；区内读写编辑直接执行，区外访问需批准当前调用，批准后可实际访问，结果中使用绝对路径。read_file 按行读取 UTF-8 文本，write_file 创建或覆盖，edit_file 只替换唯一的精确匹配，glob 保持工作区内查询，返回最多 200 条排序路径。父目录必须已存在。工具参数或预期执行错误通过官方 error ToolMessage 反馈给模型，未知异常终止本轮。
+主 Agent 默认启用九个普通内置工具：`read_file`、`write_file`、`edit_file`、`glob`、`bash`、`read_image`、`write_todos`、`load_skill`、`delegate_task`。在 TOML 中通过 `[agent].tools` 显式选择，例如只允许读取和查找文件：
+
+```toml
+[agent]
+tools = ["read_file", "glob", "read_image"]
+```
+
+省略 `[agent]` 或 `tools` 时允许全部普通内置工具；显式列表只允许列出的工具，`tools = []` 禁用全部普通内置工具。未知名称、重复名称、错误类型和 `*` 均报配置错误。新增内置工具会进入缺省集合，但不会自动加入用户的显式列表。配置摘要的 `agent.tools` 展示所选名称；`/context` 与模型实际请求使用同一装配结果，禁用工具的 schema 和 Todo/Skill 附加提示不会被注入。
+
+`delegate_task` 只有在主 Agent 允许使用且配置了子 Agent 时注册；没有子定义时跳过，不报错。主子白名单独立：主 Agent 仅允许 `delegate_task` 时，仍可委派子 Agent 使用其自身获准的工具。禁用主 Agent 的写入工具不会撤销子 Agent 的写权限。已配置子 Agent 的定义和提示文件仍会统一校验。
+
+MCP 不受 `[agent].tools` 限制：配置了服务时仍提供 `connect_mcp`，连接后发现的远端工具默认可用，显式 `confirm` 仍需审批。`connect_mcp` 和 `mcp__...` 名称不能填入普通内置工具列表。修改配置后重启交互进程并使用新会话；不支持配置热重载或旧会话迁移。
+
+启用后的六个基础工具为 `read_file/read_image/write_file/edit_file/glob/bash`。文件路径按 session workdir 解析并跟随符号链接；区内读写编辑直接执行，区外访问需批准当前调用，批准后可实际访问，结果中使用绝对路径。read_file 按行读取 UTF-8 文本，write_file 创建或覆盖，edit_file 只替换唯一的精确匹配，glob 保持工作区内查询，返回最多 200 条排序路径。父目录必须已存在。工具参数或预期执行错误通过官方 error ToolMessage 反馈给模型，未知异常终止本轮。
 
 `read_image(path)` 读取单张本地 JPEG、PNG、GIF 或 WebP，按文件头识别格式，单图上限 32 MiB；不下载 URL，不支持 TIFF/GeoTIFF，不缩放或转码。成功后模型会收到图片本身及路径说明；缺失、空文件、格式错误或超限会返回工具错误。图片随工具结果保存到 Checkpoint，删除原图后仍可恢复；发送模型请求时，将图片放在同批全部工具结果之后的用户图片消息中，不向会话重复保存附加消息。工具读图和用户上传图片共同接受完整历史的图片限制检查。
 
-Agent 还通过 `TodoListMiddleware` 获得官方 `write_todos` 工具，可为复杂任务创建、更新和完成清单。每项包含 `content` 与 `pending/in_progress/completed` 状态，每次提交完整列表替换旧计划，空列表用于清空。计划随同一 session 的 SQLite Checkpoint 恢复，普通续聊不自动清空，不同 session 隔离；不符合官方 schema 的更新返回工具错误并保留原计划。使用官方默认提示，不额外限制 20 项、单个进行中任务，也不添加每三轮提醒。
+启用 `write_todos` 时，Agent 通过 `TodoListMiddleware` 获得官方规划工具，可为复杂任务创建、更新和完成清单。每项包含 `content` 与 `pending/in_progress/completed` 状态，每次提交完整列表替换旧计划，空列表用于清空。计划随同一 session 的 SQLite Checkpoint 恢复，普通续聊不自动清空，不同 session 隔离；不符合官方 schema 的更新返回工具错误并保留原计划。使用官方默认提示，不额外限制 20 项、单个进行中任务，也不添加每三轮提醒。
 
 Skill 目录由 `[runtime].skills_dir` 配置，默认 `../.agents/skills`，相对 TOML 所在目录解析；仓库示例指向项目根目录的 `.agents/skills/`，不随 session workdir 改变。只扫描一层 `*/SKILL.md`，从 YAML frontmatter 读取 `name`、`description`；字段缺失时分别回退到目录名和正文首行。无效文件记录诊断并跳过，同名技能或错误根路径报配置错误；缺失或空目录不阻断 Agent。使用 PyYAML 的安全解析，未知字段（包括 `allowed-tools`）不改变权限。
 
+主 Agent 的 `[agent].skills` 和每个 `[[subagents]].skills` 独立控制可加载技能。例如，在已有的 `[agent]` 块中添加 `skills = ["find-skills"]`，主 Agent 就只能看到和加载这个 Skill；子 Agent 仍按自己的 `skills` 配置选择。省略字段表示全部当前可识别的已安装技能，新安装技能自动可用；`skills = []` 表示全部关闭，显式列表不会自动扩展。配置摘要中的 `null` 表示默认全部，空列表表示全部关闭。
+
+白名单按 Skill 的标准名称精确匹配：优先使用 frontmatter 的 `name`，缺省时使用目录名。空白名称、重复名称、错误类型和 `*` 在配置加载时被拒绝。完成技能库扫描后，构图和 `/context` 会校验所有已配置名单；未安装、无效或无法识别的名称报配置错误，指出主 Agent 或对应子 Agent ID。关闭 `load_skill` 或委派入口也不会忽略非法名单。
+
+`tools` 决定是否提供 `load_skill`，`skills` 决定它可以读取哪些技能；配置 Skill 不会自动开启加载工具。`skills = []` 时，已获准的 `load_skill` 入口保留，目录显示 `none`，所有加载请求均返回错误。每次构图仍只扫描一次完整技能库，再为主子 Agent 创建独立只读子集；目录、实际加载和错误消息中的可用列表使用同一子集。请求禁用 Skill 不返回其正文、路径或描述；上下文面板只计入主 Agent 当前可用目录。
+
+Skill 白名单约束目录与 `load_skill` 入口，不增加文件系统封禁，也不清除历史消息中已加载的内容。修改白名单后重启交互进程并使用新会话。`/skill` 和 `rsh list-skill` 继续展示完整已安装库，方便选择配置名称。
+
 在交互模式输入 `/skill`，或直接执行 `rsh list-skill`，可查看当前配置目录中可识别的已安装技能：显示管理目录、数量、名称和描述，不展开正文。每次调用重新扫描，可查看新放入的技能；空目录明确提示没有技能。两种入口复用同一加载器，无需模型调用或创建会话。`/help` 和 `rsh --help` 分别列出这两个命令；`list-skill` 支持通过根参数或子命令参数传入 `--config`，子命令显式参数优先。`/skill` 不接受额外参数。
 
-自定义 `SkillMiddleware` 在每次模型请求中只追加名称、描述和加载指引。`load_skill(name)` 从本次构图的只读快照返回完整原文及来源目录，框架将其保存为普通 ToolMessage；后续请求和同一 session 的 Checkpoint 续聊可复用。扫描时全文会读入内存，加载前不会交给模型。单次构图内修改文件不刷新，下次 ask/resume 构图时重新扫描；编辑技能后建议新建 session，避免混用历史中的旧说明。完整加载结果受 `max_tool_output_bytes` 限制，超限返回错误，不截断为不完整说明。
+启用 `load_skill` 时，自定义 `SkillMiddleware` 在每次模型请求中只追加名称、描述和加载指引。`load_skill(name)` 从本次构图的只读快照返回完整原文及来源目录，框架将其保存为普通 ToolMessage；后续请求和同一 session 的 Checkpoint 续聊可复用。扫描时全文会读入内存，加载前不会交给模型。单次构图内修改文件不刷新，下次 ask/resume 构图时重新扫描；编辑技能后建议新建 session，避免混用历史中的旧说明。完整加载结果受 `max_tool_output_bytes` 限制，超限返回错误，不截断为不完整说明。
 
-引用文件和脚本继续按需交给现有工具，路径以返回的 `Skill directory` 为基准；加载不改变 Bash cwd、不执行命令，也不授予额外权限。技能库即使位于 workdir 外，已登记的 manifest 仍可按名加载；关联文件若在区外，主代理仍需审批，子代理仍拒绝。技能安装、联网搜索和自动执行脚本不属于加载器功能。可用现有 `find-skills` 验证：`uv run rsh ask --workdir ./workdir "先加载 find-skills，再概述寻找和评估技能的流程，不联网、不安装"`。子 Agent 需在其 `tools` 中显式加入 `load_skill`，否则工具与目录都不可见。
+引用文件和脚本继续按需交给现有工具，路径以返回的 `Skill directory` 为基准；加载不改变 Bash cwd、不执行命令，也不授予额外权限。技能库即使位于 workdir 外，该 Agent 获准的 manifest 仍可按名加载；关联文件若在区外，主代理仍需审批，子代理仍拒绝。技能安装、联网搜索和自动执行脚本不属于加载器功能。可用现有 `find-skills` 验证：`uv run rsh ask --workdir ./workdir "先加载 find-skills，再概述寻找和评估技能的流程，不联网、不安装"`。子 Agent 需在其 `tools` 中显式加入 `load_skill`，否则工具与目录都不可见。
 
 规划工具只更新状态，不执行清单中的操作，也不提供提前授权。它与需审工具同批出现时，会一起等待审批；恢复后规划正常更新，实际操作按批准或拒绝执行。同一响应中的多个 `write_todos` 由官方中间件返回错误，其他工具继续遵循原有执行机制。规划产生的后续模型调用仍计入预算；默认 Stop Hook 不强制清空未完成任务。用户可在问答中要求汇报进度，开发者可读取 `agent.aget_state(...).values.get("todos", [])`；当前 `/status` 不展示计划，CLI JSON 结构保持不变。
 
-主 Agent 使用 `delegate_task(agent_id, query)` 选择配置中的子 Agent。每个 `[[subagents]]` 定义包含唯一 `id`、可读 `name`、职责 `description`、独立 `system_prompt_file`、工具白名单 `tools` 和记忆模式 `persistence`。提示词路径相对于 TOML 文件解析，支持 `{workdir}`；名称、角色、工具、工作目录不能通过模型的委派参数覆盖。可省略所有子代理定义，或在 TOML 顶层（任何表头之前）设置 `subagents = []`；此时只运行主 Agent，不创建子图，也不注册 `delegate_task`。已配置的子代理仍会校验：重复 id、未知工具、重复工具及缺失或空提示词在执行前报错。
+启用 `delegate_task` 且存在子定义时，主 Agent 使用 `delegate_task(agent_id, query)` 选择配置中的子 Agent。每个 `[[subagents]]` 定义包含唯一 `id`、可读 `name`、职责 `description`、独立 `system_prompt_file`、工具白名单 `tools`、可选 Skill 白名单 `skills` 和记忆模式 `persistence`。提示词路径相对于 TOML 文件解析，支持 `{workdir}`；名称、角色、工具、工作目录不能通过模型的委派参数覆盖。可省略所有子代理定义，或在 TOML 顶层（任何表头之前）设置 `subagents = []`；此时只运行主 Agent，不创建子图，也不注册 `delegate_task`。已配置的子代理仍会校验：重复 id、未知工具、重复工具及缺失或空提示词在执行前报错。
 
 默认预设为 `researcher`（Researcher，持续记忆）和 `engineer`（Engineer，每次独立）。Researcher 负责工作区读取与需求调研，梳理现状、约束、证据和验收标准；Engineer 根据明确需求与调研结论在工作区完成具体实现并验证结果。工具范围落实到模型和执行图，包含 middleware 提供的 `write_todos` 与 `load_skill`；`tools = []` 表示纯推理，省去相应名称即不装配对应 middleware。子工具集中没有再次委派工具。`researcher` 提供读取、查找、Todo 和 Skill 加载；`engineer` 另有写入、编辑和 Bash 工具；拥有 `bash` 的角色仍具备通用命令执行能力，工具白名单不构成 OS 沙箱。
 
@@ -104,7 +125,7 @@ Skill 目录由 `[runtime].skills_dir` 配置，默认 `../.agents/skills`，相
 
 子图使用官方 Checkpoint：独立模式继承父 saver，持续模式启用 `checkpointer=True` 并以稳定具名子图隔离状态。子工具收到权限拒绝后可继续合法操作或报告未完成，不产生待审批状态，也不会自动交给主代理执行。主代理可根据用户任务决定下一步；如果亲自调用需审工具，仍通过现有 `get_pending_approvals` 与 `resume` 审批。进程重启后可以继续持久子代理的对话，拒绝结果保留在子历史中。没有独立 child session 或后台任务，也没有独立的 `approvals` 或 `resume` CLI 子命令；非 TTY 的 `ask --json` 仅在主代理待审时以 2 退出。
 
-父 session 保存子定义的执行摘要，每次 ask/resume 在会话锁内核对。更改子 id、提示内容、工具集合或记忆模式时，返回 `subagent_config_mismatch`，需恢复原定义或新建父会话；仅改可读名称不重置历史。项目不迁移旧配置和旧会话。
+父 session 保存子定义的执行摘要，每次 ask/resume 在会话锁内核对。更改子 id、提示内容、工具集合、Skill 白名单或记忆模式时，返回 `subagent_config_mismatch`，需恢复原定义或新建父会话；仅改可读名称不重置历史。项目不迁移旧配置和旧会话。
 
 `[runtime].bash_timeout_s` 默认 60 秒，`max_tool_output_bytes` 默认 65536 字节；后者限制文本工具正文，Bash 的 stdout/stderr 共用预算。`read_image` 使用独立的 32 MiB 图片上限，不截断图片数据。超时和取消会清理进程组，输出过长会截断但继续排空管道。Bash 的 cwd 不是操作系统沙箱，命令可访问当前用户拥有权限的路径。同批工具默认可并发，有依赖的操作需等待前一步结果再发起。
 
