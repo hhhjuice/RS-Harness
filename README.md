@@ -62,6 +62,8 @@ uv run rsh ask --image ./sample.png --json
 
 `--config`、`--session-id` 和 `--workdir` 可放在子命令前后。放在子命令前时作为缺省值，子命令上的显式参数优先。
 
+`rsh` 交互模式、`ask` 和 `create-session` 创建新会话时，默认工作目录为项目根目录下的 `workdir/`，与启动命令时的当前目录无关；目录不存在时自动创建。可用 `--workdir` 指定其他目录，相对路径按启动命令时的当前目录解析。
+
 `rsh --help` 展示 CLI 子命令，并说明 `rsh ask --image` 的图片输入方式及支持 `--json` 的子命令；交互 `/help` 展示交互命令清单。各子命令的完整参数可通过 `rsh COMMAND --help` 查看；`--image` 是 `ask` 的选项，须放在 `ask` 后。
 
 在交互提示符输入 `/context`，查看当前主 session 下一轮将携带的上下文。面板显示估算已用量、窗口总容量、剩余量、占用百分比和用量条，并按 System、User、Assistant、Tool schemas、Tool results、Skills 分类；有图片时增加 Images。分类百分比均以总窗口为分母，包含最新回复及工具调用参数，不是历次 API 用量的累计。达到 60% / 90% 时用量条分别变为黄色 / 红色；窄终端自动紧凑排版，重定向及 `NO_COLOR` 下不显示颜色。
@@ -70,7 +72,7 @@ uv run rsh ask --image ./sample.png --json
 
 容量优先读取可选的 `[model].context_window` 正整数配置，再使用 LangChain 自带模型 profile；`max_tokens` 是输出上限，不作为上下文容量。无法识别容量时显示已用量和分类，其他指标显示 `—`，并提示 `Set model.context_window`。当前依赖的 profile 未识别 `glm-5.3-flash`，使用该模型时应按服务商支持的容量显式配置。统计命令不调用模型、执行工具、连接 MCP、创建会话或追加消息。MCP 连接时会把模型可见工具 schema 一并保存到 Checkpoint，查询只读取已启用服务的快照；此变更不迁移旧会话。`/context` 不接受参数，无 session 时显示 `No session`。
 
-`--image` 可重复使用，图片和文本组成同一条标准消息；省略文本可提交仅图片输入。新会话的相对图片路径按 `--workdir` 或当前目录解析，续聊按 session 原工作目录解析。用户明确指定的绝对图片路径可以位于工作目录外。输入无效时不会创建新会话；`ask --json` 返回 JSON，错误退出码为 1。
+`--image` 可重复使用，图片和文本组成同一条标准消息；省略文本可提交仅图片输入。新会话的相对图片路径按 `--workdir` 或默认的项目根目录下 `workdir/` 解析，续聊按 session 原工作目录解析。用户明确指定的绝对图片路径可以位于工作目录外。输入无效时不会创建新会话；`ask --json` 返回 JSON，错误退出码为 1。
 
 本地图片按文件内容识别 JPEG、PNG、GIF、WebP，编码为带 MIME 的 base64 标准内容块。图片数据随 SQLite 保存，原文件删除后仍可续聊；HTTP(S) URL 直接交给 provider 获取，恢复后仍依赖 URL 可达。交互模式可用 `--session-id` 继续图片会话；用户可通过 `ask --image` 提交图片，也可在对话中让 Agent 调用 `read_image` 查看本地图片。
 

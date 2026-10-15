@@ -26,7 +26,7 @@ from .context_display import print_context_usage
 from .inputs import InputError, build_human_message
 from .mcp import MCPRecoveryError
 from .progress import CliProgress
-from .sessions.catalog import SessionBusy, SessionCatalog, SessionError
+from .sessions.catalog import Session, SessionBusy, SessionCatalog, SessionError
 from .skills import SkillLoader
 
 RSH_PROMPT = [("class:rsh-prompt", "rsh> ")]
@@ -147,6 +147,17 @@ def _print_error(error: Exception, as_json: bool, *, code: str | None = None) ->
 
 
 DEFAULT_CONFIG = Path(".agents/config.toml")
+DEFAULT_WORKDIR = Path(__file__).resolve().parents[2] / "workdir"
+
+
+def _create_session(config: Config, *, workdir: Path | None) -> Session:
+    if workdir is None:
+        workdir = DEFAULT_WORKDIR
+        try:
+            workdir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise SessionError(f"Unable to create working directory {workdir}: {exc}") from exc
+    return create_session(config, workdir=str(workdir))
 
 
 def _root_option(ctx: typer.Context, name: str, value):
@@ -188,12 +199,12 @@ def ask_command(
         workdir = _root_option(ctx, "workdir", workdir)
         loaded = _load(config)
         session = SessionCatalog.open(loaded, session_id) if session_id else None
-        input_workdir = session.meta.workdir if session else (workdir or Path.cwd())
+        input_workdir = session.meta.workdir if session else (workdir or DEFAULT_WORKDIR)
         if session and workdir and workdir.expanduser().resolve() != Path(session.meta.workdir):
             raise InputError("session_workdir_mismatch: an existing session keeps its original workdir")
         message = build_human_message(text, images=images or (), workdir=input_workdir, config=loaded)
         if session_id is None:
-            session = create_session(loaded, workdir=str(workdir) if workdir else None)
+            session = _create_session(loaded, workdir=workdir)
             session_id = session.session_id
         progress = None if as_json else CliProgress()
         options = {} if progress is None else {"callbacks": [progress]}
@@ -220,7 +231,7 @@ def create_session_command(
     try:
         config = _root_option(ctx, "config", config)
         workdir = _root_option(ctx, "workdir", workdir)
-        session = create_session(_load(config), workdir=str(workdir) if workdir else None)
+        session = _create_session(_load(config), workdir=workdir)
     except (ConfigError, SessionError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
@@ -419,7 +430,7 @@ async def _interactive(config_path: Path, *, session_id: str | None, workdir: Pa
 
         try:
             if session is None:
-                session = create_session(config, workdir=str(workdir) if workdir else None)
+                session = _create_session(config, workdir=workdir)
             progress = CliProgress()
             result = await ask(config, session.session_id, text, callbacks=[progress])
             if result.interrupts:

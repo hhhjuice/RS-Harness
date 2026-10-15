@@ -455,6 +455,66 @@ def test_empty_ask_creates_no_session(config, tmp_path, extra):
     assert SessionCatalog.list(config) == []
 
 
+@pytest.mark.parametrize(("arguments", "text"), [
+    ([], "hello\n/quit\n"),
+    (["ask", "hello", "--json"], None),
+    (["create-session", "--json"], None),
+])
+def test_new_cli_sessions_default_to_project_workdir(config, tmp_path, monkeypatch, arguments, text):
+    from rs_harness import application, cli
+
+    workdir = tmp_path / "project" / "workdir"
+    launch_dir = tmp_path / "launch"
+    launch_dir.mkdir()
+    monkeypatch.setattr(cli, "DEFAULT_WORKDIR", workdir)
+    monkeypatch.chdir(launch_dir)
+
+    async def ask(config, session_id, message, **kwargs):
+        return application.InteractionResult(
+            session_id=session_id, interaction_id="interaction-id",
+            status="succeeded", session_status="running", answer="done",
+        )
+
+    monkeypatch.setattr(cli, "ask", ask)
+    result = CliRunner().invoke(
+        app, [*arguments, "--config", str(tmp_path / "config.toml")], input=text,
+    )
+
+    assert result.exit_code == 0, result.output
+    sessions = SessionCatalog.list(config)
+    assert len(sessions) == 1
+    assert sessions[0].meta.workdir == str(workdir)
+    assert workdir.is_dir()
+    assert not (launch_dir / "workdir").exists()
+
+
+def test_ask_resolves_relative_images_from_default_workdir(config, tmp_path, monkeypatch):
+    from rs_harness import application, cli
+
+    workdir = tmp_path / "project" / "workdir"
+    workdir.mkdir(parents=True)
+    write_test_image(workdir / "sample.png")
+    monkeypatch.setattr(cli, "DEFAULT_WORKDIR", workdir)
+    monkeypatch.chdir(tmp_path)
+    messages = []
+
+    async def ask(config, session_id, message, **kwargs):
+        messages.append(message)
+        return application.InteractionResult(
+            session_id=session_id, interaction_id="interaction-id",
+            status="succeeded", session_status="running", answer="seen",
+        )
+
+    monkeypatch.setattr(cli, "ask", ask)
+    result = CliRunner().invoke(app, [
+        "ask", "--config", str(tmp_path / "config.toml"), "--image", "sample.png", "--json",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert messages[0].content[0]["type"] == "image"
+    assert SessionCatalog.list(config)[0].meta.workdir == str(workdir)
+
+
 def test_root_workdir_applies_to_ask(config, tmp_path, monkeypatch):
     from types import SimpleNamespace
 
