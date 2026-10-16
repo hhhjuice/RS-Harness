@@ -175,6 +175,33 @@ def test_skill_command_empty_or_missing_directory(config, tmp_path, skill_runner
     result = skill_runner.invoke(app, ["--config", str(tmp_path / "config.toml")], input="/skill\n/quit\n")
     assert result.exit_code == 0, result.output
     assert "No skills installed." in result.stdout
+    assert "Installed skills" in result.stdout and "0 skills" in result.stdout
+    assert result.stdout.count("╭") == result.stdout.count("╰") == 1
+    assert not config.runtime.sessions_dir.exists()
+
+
+@pytest.mark.parametrize("description,display", [
+    ("First line\n\nsecond   line", "First line second line"),
+    ("文" * 130 + " description_end", "文" * 130 + " description_end"),
+    ("[bold]Literal[/bold]\x1b]52;c;dGVzdA==\x07", r"[bold]Literal[/bold]\x1b]52;c;dGVzdA==\x07"),
+])
+def test_list_skill_matches_interactive_output(config, tmp_path, skill_runner, description, display):
+    path = config.runtime.skills_dir / "example/SKILL.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(f"---\nname: example\ndescription: {json.dumps(description)}\n---\nPRIVATE-SKILL-BODY")
+    options = ["--config", str(tmp_path / "config.toml")]
+    listed = skill_runner.invoke(app, ["list-skill", *options], color=True)
+    interactive = skill_runner.invoke(app, options, input="/skill\n/quit\n", color=True)
+    assert listed.exit_code == interactive.exit_code == 0, (listed.output, interactive.output)
+    assert listed.stdout.strip() in interactive.stdout
+    assert "Installed skills" in listed.stdout and "1 skill" in listed.stdout
+    assert "example" in listed.stdout
+    normalized = "".join(listed.stdout.replace("│", "").split())
+    assert "".join(f"Directory: {config.runtime.skills_dir}".split()) in normalized
+    assert "".join(display.split()) in normalized
+    assert listed.stdout.count("╭") == listed.stdout.count("╰") == 1
+    assert "PRIVATE-SKILL-BODY" not in listed.stdout and "SKILL.md" not in listed.stdout
+    assert not any(char in listed.stdout + interactive.stdout for char in ("\x1b", "\x07", "\x9b", "\x9c", "\x9d"))
     assert not config.runtime.sessions_dir.exists()
 
 
@@ -224,9 +251,11 @@ def test_skill_command_rescans_when_called_again(config, tmp_path, monkeypatch, 
     monkeypatch.setattr(cli.typer, "prompt", lambda *args, **kwargs: next(inputs))
     result = skill_runner.invoke(app, ["--config", str(tmp_path / "config.toml")])
     assert result.exit_code == 0, result.output
-    assert "Installed skills (1):" in result.stdout and "Installed skills (2):" in result.stdout
-    assert result.stdout.count("- alpha: Alpha description") == 2
-    assert result.stdout.count("- beta: Beta description") == 1
+    assert result.stdout.count("Installed skills") == 2
+    assert "1 skill" in result.stdout and "2 skills" in result.stdout
+    normalized = "".join(result.stdout.replace("│", "").split())
+    assert normalized.count("alphaAlphadescription") == 2
+    assert normalized.count("betaBetadescription") == 1
     assert "PRIVATE-" not in result.stdout
     assert not config.runtime.sessions_dir.exists()
 
@@ -240,7 +269,8 @@ def test_list_skill_uses_explicit_config(config, tmp_path, monkeypatch, skill_ru
         arguments = ["--config", str(tmp_path / "missing.toml"), "list-skill", *options]
     result = skill_runner.invoke(app, arguments)
     assert result.exit_code == 0, result.output
-    assert f"Skills directory: {config.runtime.skills_dir}" in result.stdout
+    normalized = "".join(result.stdout.replace("│", "").split())
+    assert "".join(f"Directory: {config.runtime.skills_dir}".split()) in normalized
     assert "No skills installed." in result.stdout
     assert not config.runtime.sessions_dir.exists()
 
@@ -255,8 +285,9 @@ def test_list_skill_errors_without_session(config, tmp_path, skill_runner):
 
 @pytest.mark.parametrize("description,summary", [
     ("Search docs\n\nwith keywords", "Search docs with keywords"),
-    ("文" * 130, "文" * 117 + "..."),
-    ("", ""),
+    ("文" * 130, "文" * 130),
+    ("", "—"),
+    ("[bold]Search[/bold] docs", "[bold]Search[/bold] docs"),
     ("\x1b]52;c;dGVzdA==\x07查看文档", r"\x1b]52;c;dGVzdA==\x07查看文档"),
     ("\x1b[31mSearch docs\x1b[0m", r"\x1b[31mSearch docs\x1b[0m"),
     ("\x9d52;c;dGVzdA==\x9cLookup", r"\x9d52;c;dGVzdA==\x9cLookup"),
@@ -285,10 +316,12 @@ def test_list_mcp_matches_interactive_output(config, tmp_path, monkeypatch, desc
     interactive = runner.invoke(app, options, input="/mcp\n/quit\n", color=True)
     assert listed.exit_code == interactive.exit_code == 0, (listed.output, interactive.output)
     assert listed.stdout.strip() in interactive.stdout
-    assert "Configured MCP servers (1)" in listed.stdout
-    assert "docs (http), tools: 1" in listed.stdout
-    expected = "  - search [allow]" + (f": {summary}" if summary else "")
-    assert expected in listed.stdout.splitlines()
+    assert "MCP servers" in listed.stdout and "1 server · 1 tool" in listed.stdout
+    assert "docs · http · 1 tool" in listed.stdout
+    assert "search" in listed.stdout and "allow" in listed.stdout
+    normalized = "".join(listed.stdout.replace("│", "").split())
+    assert "".join(summary.split()) in normalized
+    assert listed.stdout.count("╭") == listed.stdout.count("╰") == 1
     assert "mcp__" not in listed.stdout and "MCP name:" not in listed.stdout
     assert "Input schema" not in listed.stdout and '"required"' not in listed.stdout
     assert '"query"' not in listed.stdout and "\\n" not in listed.stdout

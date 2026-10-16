@@ -201,7 +201,7 @@ def test_skill_cli_lists_full_library_despite_agent_selections(config, tmp_path,
     result = CliRunner().invoke(cli.app, args, input="/skill\n/quit\n" if interactive else None)
 
     assert result.exit_code == 0, result.output
-    assert "Installed skills (2)" in result.stdout
+    assert "Installed skills" in result.stdout and "2 skills" in result.stdout
     assert all(f"Description of {name}" in result.stdout for name in ("alpha", "beta"))
     assert "PRIVATE-" not in result.output
     assert not config.runtime.sessions_dir.exists()

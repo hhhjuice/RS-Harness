@@ -25,8 +25,10 @@ from .config import REASONING_EFFORTS, Config, ConfigError, save_reasoning_effor
 from .context_display import print_context_usage
 from .inputs import InputError, build_human_message
 from .mcp import MCPRecoveryError
+from .mcp_display import print_mcp_servers
 from .progress import CliProgress
 from .sessions.catalog import Session, SessionBusy, SessionCatalog, SessionError
+from .skill_display import print_skill_catalog
 from .skills import SkillLoader
 
 RSH_PROMPT = [("class:rsh-prompt", "rsh> ")]
@@ -66,30 +68,12 @@ def _load(path: Path) -> Config:
 
 def _print_skills(config: Config) -> None:
     skills = SkillLoader(config.runtime.skills_dir)
-    typer.echo(f"Skills directory: {config.runtime.skills_dir}")
-    typer.echo(f"Installed skills ({len(skills.skills)}):\n{skills.catalog()}" if skills.skills else "No skills installed.")
-
-
-def _terminal_text(value: str) -> str:
-    """Render remote control characters literally instead of executing them in a terminal."""
-    return "".join(char if char.isprintable() else char.encode("unicode_escape").decode("ascii") for char in value)
+    print_skill_catalog(config.runtime.skills_dir, list(skills.skills.values()))
 
 
 async def _print_mcp(config: Config) -> None:
     servers = await get_configured_mcp(config)
-    if not servers:
-        typer.echo("No MCP servers configured.")
-        return
-    typer.echo(f"Configured MCP servers ({len(servers)}):")
-    for server in servers:
-        typer.echo(f"- {server['name']} ({server['transport']}), tools: {len(server['tools'])}")
-        for tool in server["tools"]:
-            name = _terminal_text(json.dumps(tool["raw_name"], ensure_ascii=False)[1:-1])
-            description = _terminal_text(" ".join(tool["description"].split()))
-            if len(description) > 120:
-                description = description[:117] + "..."
-            summary = f": {description}" if description else ""
-            typer.echo(f"  - {name} [{tool['permission']}]{summary}")
+    print_mcp_servers(servers)
 
 
 def _print_result(result: InteractionResult, as_json: bool, progress: CliProgress | None = None) -> None:

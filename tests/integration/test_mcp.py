@@ -559,13 +559,21 @@ def test_list_mcp_and_slash_mcp_read_real_stdio_without_session(config, tmp_path
     interactive = subprocess.run([executable, *options], input="/mcp\n/quit\n", capture_output=True, text=True, timeout=30)
     assert listed.returncode == interactive.returncode == 0, (listed.stderr, interactive.stderr)
     assert listed.stdout.strip() in interactive.stdout
-    assert "Configured MCP servers (1)" in listed.stdout
-    assert f"{kind} (stdio), tools: {2 if kind == 'docs' else 0}" in listed.stdout
+    assert "MCP servers" in listed.stdout
+    assert f"1 server · {2 if kind == 'docs' else 0} tools" in listed.stdout
+    assert f"{kind} · stdio · {2 if kind == 'docs' else 0} tools" in listed.stdout
+    assert listed.stdout.count("╭") == listed.stdout.count("╰") == 1
     if kind == "docs":
-        assert "get.version [allow]: Get the documentation API version." in listed.stdout
-        assert "search [allow]: Search project documentation" in listed.stdout
+        assert "get.version" in listed.stdout and "search" in listed.stdout
+        assert listed.stdout.count("allow") == 2
+        normalized = "".join(listed.stdout.replace("│", "").split())
+        assert "GetthedocumentationAPIversion." in normalized
+        assert "Searchprojectdocumentation,includingagenthooks." in normalized
         assert "mcp__" not in listed.stdout and "MCP name:" not in listed.stdout
         assert "Input schema" not in listed.stdout and '"query"' not in listed.stdout
+    else:
+        assert "No tools exposed." in listed.stdout
+    assert "\x1b" not in listed.stdout
     assert successful_calls(log) == [] and listed.stderr == interactive.stderr == ""
     assert sum(item["event"] == "start" for item in events(log)) == 2
     assert not config.runtime.sessions_dir.exists()
@@ -597,7 +605,9 @@ def test_interactive_mcp_lists_configuration_without_starting_conversation(confi
     monkeypatch.setattr(cli, "get_pending_approvals", unexpected)
     result = CliRunner().invoke(cli.app, [], input="/mcp\n/mcp\n/quit\n")
     assert result.exit_code == 0, result.output
-    assert result.stdout.count("Configured MCP servers (2)") == 2
-    assert "get.version [allow]" in result.stdout and "trigger [allow]" in result.stdout
+    assert result.stdout.count("MCP servers") == 2
+    assert result.stdout.count("2 servers · 5 tools") == 2
+    assert all(name in result.stdout for name in ("get.version", "trigger", "unlisted"))
+    assert result.stdout.count("allow") == 10
     assert not config.runtime.sessions_dir.exists()
     assert successful_calls(tmp_path / "docs.jsonl") == successful_calls(tmp_path / "deploy.jsonl") == []
