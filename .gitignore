@@ -9,6 +9,7 @@ __pycache__/
 /.agents/config.toml
 /.agents/sessions/
 /.agents/skills/
+/.agents/config
 /workdir/
 *.egg-info/
 *.py[cod]
