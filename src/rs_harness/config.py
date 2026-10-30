@@ -161,6 +161,8 @@ class MCPServerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     tools: dict[str, Literal["allow", "confirm"]] = Field(default_factory=dict)
+    resources: dict[str, Literal["allow", "confirm"]] = Field(default_factory=dict)
+    prompts: dict[str, Literal["allow", "confirm"]] = Field(default_factory=dict)
 
 
 class MCPStdioConfig(MCPServerConfig):
@@ -328,7 +330,8 @@ class Config(BaseModel):
             "max_tool_output_bytes": self.runtime.max_tool_output_bytes,
             "subagents": [item.model_dump(mode="json") for item in self.subagents],
             "mcp": {name: {"transport": server.transport,
-                           "policy_count": len(server.tools)} for name, server in self.mcp.servers.items()},
+                           "policy_count": len(server.tools) + len(server.resources) + len(server.prompts)}
+                    for name, server in self.mcp.servers.items()},
         }
 
 

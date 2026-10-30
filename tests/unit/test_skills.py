@@ -7,9 +7,6 @@ from rs_harness.config import Config, ConfigError, SubagentConfig, subagents_dig
 from rs_harness.skills import SkillLoader
 
 
-FIND_SKILLS = Path(__file__).resolve().parents[2] / ".agents/skills/find-skills/SKILL.md"
-
-
 def manifest(root, directory, content):
     path = root / directory / "SKILL.md"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -17,24 +14,24 @@ def manifest(root, directory, content):
     return path
 
 
-def test_real_skill_discovery_and_immutable_snapshot(tmp_path):
-    original = FIND_SKILLS.read_text()
-    path = manifest(tmp_path, "find-skills", original)
+def test_skill_discovery_and_immutable_snapshot(tmp_path):
+    original = "---\nname: fixture-skill\ndescription: Fixture skill description\n---\nFIXTURE-SKILL-BODY"
+    path = manifest(tmp_path, "fixture-skill", original)
     (tmp_path / ".DS_Store").write_text("ignored")
     (tmp_path / "empty").mkdir()
     manifest(tmp_path / "nested", "ignored", "# Nested")
     loader = SkillLoader(tmp_path)
-    assert list(loader.skills) == ["find-skills"]
-    skill = loader.load("find-skills")
+    assert list(loader.skills) == ["fixture-skill"]
+    skill = loader.load("fixture-skill")
     assert skill.path == path and skill.content == original
-    assert "Helps users discover and install agent skills" in loader.catalog()
-    assert "## What is the Skills CLI?" not in loader.catalog()
+    assert "Fixture skill description" in loader.catalog()
+    assert "FIXTURE-SKILL-BODY" not in loader.catalog()
     with pytest.raises(TypeError):
         loader.skills["new"] = skill
     with pytest.raises(FrozenInstanceError):
         skill.content = "changed"
     path.unlink()
-    assert loader.load("find-skills").content == original
+    assert loader.load("fixture-skill").content == original
     assert SkillLoader(tmp_path).catalog() == "none"
 
 

@@ -21,7 +21,7 @@ from tests.integration.test_subagents import call, delegate, install_worker, rec
 from tests.models import ScriptedModel
 
 
-BODY_MARKER = "## What is the Skills CLI?"
+BODY_MARKER = "FIXTURE-SKILL-BODY"
 
 
 def put_skill(config, name, body):
@@ -31,12 +31,12 @@ def put_skill(config, name, body):
     return path
 
 
-def load_call(name="find-skills", call_id="load"):
+def load_call(name="fixture-skill", call_id="load"):
     return call("load_skill", {"name": name}, call_id)
 
 
 def raw_skill(config):
-    return (config.runtime.skills_dir / "find-skills/SKILL.md").read_text()
+    return (config.runtime.skills_dir / "fixture-skill/SKILL.md").read_text()
 
 
 def assert_catalog_only(messages):
@@ -44,10 +44,10 @@ def assert_catalog_only(messages):
     assert len(systems) == 1
     text = str(systems[0].content)
     assert text.count("## Available Skills") == 1
-    assert "find-skills" in text
-    assert "Helps users discover and install agent skills" in text
+    assert "fixture-skill" in text
+    assert "Fixture skill for integration tests" in text
     assert BODY_MARKER not in text
-    assert "npx skills add vercel-labs/agent-skills@react-best-practices" not in text
+    assert "FIXTURE-INSTALL-EXAMPLE" not in text
 
 
 def test_sync_hook_preserves_system_blocks_and_registers_tool(skills_config, tmp_path):
@@ -102,7 +102,7 @@ async def test_production_loading_composes_with_todo_images_and_repeated_calls(s
     assert not any(isinstance(message, SystemMessage) for message in state["messages"])
 
 
-@pytest.mark.parametrize("args", [{"name": "missing"}, {"name": "../find-skills/SKILL.md"}, {"name": ""}, {}, {"name": 42}])
+@pytest.mark.parametrize("args", [{"name": "missing"}, {"name": "../fixture-skill/SKILL.md"}, {"name": ""}, {}, {"name": 42}])
 async def test_invalid_load_is_correctable_tool_error(skills_config, tmp_path, args):
     model = ScriptedModel([request(call("load_skill", args, "bad")), request(load_call()), AIMessage(content="done")])
     session = application.create_session(skills_config, workdir=str(tmp_path))
@@ -162,7 +162,7 @@ async def test_checkpoint_survives_source_removal_and_independent_process(skills
     result = await application.ask(skills_config, session.session_id, "load", model=first)
     assert result.status == "succeeded", result.error
     original = raw_skill(skills_config)
-    (skills_config.runtime.skills_dir / "find-skills/SKILL.md").unlink()
+    (skills_config.runtime.skills_dir / "fixture-skill/SKILL.md").unlink()
     session.trajectory_path.unlink()
     script = '''
 import asyncio, json, sys
@@ -307,8 +307,8 @@ async def test_one_snapshot_shared_by_main_and_child_refreshes_on_rebuild(skills
     worker = ScriptedModel([request(load_call()), AIMessage(content="checked")])
     graph = build_agent(skills_config, workdir=str(tmp_path), model=parent, subagent_model=worker)
     assert len(scans) == 1
-    path = skills_config.runtime.skills_dir / "find-skills/SKILL.md"
-    path.write_text("---\nname: find-skills\ndescription: UPDATED-DESCRIPTION\n---\nNEW-CONTENT")
+    path = skills_config.runtime.skills_dir / "fixture-skill/SKILL.md"
+    path.write_text("---\nname: fixture-skill\ndescription: UPDATED-DESCRIPTION\n---\nNEW-CONTENT")
     removed.unlink()
     put_skill(skills_config, "added", "NEW-ADDED-CONTENT")
     await graph.ainvoke({"messages": [HumanMessage(content="run")]}, context=AgentContext(str(tmp_path)))
@@ -340,7 +340,7 @@ async def test_progress_reports_main_loading_and_errors_without_child_or_body(sk
     assert output.count("[Tool] Running load_skill") == 2
     assert output.count("[Tool] Completed load_skill") == 1
     assert output.count("[Tool] Failed load_skill") == 1
-    assert '"name":"find-skills"' in output and "Unknown skill" in output
+    assert '"name":"fixture-skill"' in output and "Unknown skill" in output
     assert BODY_MARKER not in output and "Loaded skill:" not in output
     events = records(session)
     assert sum(row["event"] == "tool_start" and row["payload"]["name"] == "load_skill" for row in events) == 3

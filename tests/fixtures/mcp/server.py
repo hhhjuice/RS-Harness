@@ -8,9 +8,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastmcp import Context, FastMCP
+from fastmcp.prompts import Message, PromptResult
+from fastmcp.resources import ResourceContent, ResourceResult
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
-from mcp.types import ElicitRequest, ElicitRequestFormParams, ImageContent, InputRequiredResult, TextContent
+from mcp.types import (
+    ElicitRequest, ElicitRequestFormParams, EmbeddedResource, ImageContent, InputRequiredResult,
+    TextContent, TextResourceContents,
+)
 
 
 def events(path):
@@ -38,6 +43,22 @@ def make_server(kind="docs", log=None, variant="original", page_size=1):
                 await asyncio.sleep(30)
             return await call_next(context)
 
+        async def on_list_resources(self, context, call_next):
+            record("list_resources")
+            return await call_next(context)
+
+        async def on_list_prompts(self, context, call_next):
+            record("list_prompts")
+            return await call_next(context)
+
+        async def on_read_resource(self, context, call_next):
+            record("read_resource")
+            return await call_next(context)
+
+        async def on_get_prompt(self, context, call_next):
+            record("get_prompt")
+            return await call_next(context)
+
     server = FastMCP(kind, lifespan=lifespan, middleware=[RecordRequests()],
                      list_page_size=page_size, strict_input_validation=True)
 
@@ -54,6 +75,68 @@ def make_server(kind="docs", log=None, variant="original", page_size=1):
             """Get the documentation API version."""
             record("call", tool="get.version")
             return "docs-api-8"
+
+        @server.resource("fixture://catalog-changed" if variant == "changed_resource" else "fixture://catalog",
+                         mime_type="application/json")
+        def catalog() -> str:
+            return '{"schema_version":"fixture","tasks":[]}'
+
+        @server.resource("fixture://large", mime_type="text/plain")
+        def large_resource() -> str:
+            return "文" * 1000
+
+        @server.resource("fixture://blob", mime_type="application/octet-stream")
+        def blob_resource() -> bytes:
+            return b"binary fixture"
+
+        @server.resource("fixture://mixed", mime_type="text/plain")
+        def mixed_resource() -> ResourceResult:
+            return ResourceResult(contents=[
+                ResourceContent("before blob", mime_type="text/plain"),
+                ResourceContent(b"binary fixture", mime_type="application/octet-stream"),
+                ResourceContent("after blob", mime_type="text/markdown"),
+            ])
+
+        @server.resource("fixture://empty", mime_type="text/plain")
+        def empty_resource() -> ResourceResult:
+            return ResourceResult(contents=[])
+
+        @server.resource("fixture://empty-text", mime_type="text/plain")
+        def empty_text_resource() -> ResourceResult:
+            return ResourceResult(contents=[ResourceContent("")])
+
+        @server.prompt(name="changed_guide" if variant == "changed_prompt" else "guide")
+        def guide(topic: str = "hooks") -> str:
+            return f"Read {topic} guidance before analysis."
+
+        @server.prompt
+        def empty_prompt() -> PromptResult:
+            return PromptResult([])
+
+        @server.prompt
+        def empty_text_prompt() -> PromptResult:
+            return PromptResult([Message("")])
+
+        @server.prompt
+        def conversation() -> PromptResult:
+            return PromptResult([
+                Message("user text"),
+                Message("assistant text", role="assistant"),
+            ])
+
+        @server.prompt
+        def mixed_prompt() -> PromptResult:
+            return PromptResult([
+                Message("before image"),
+                Message(ImageContent(type="image", data="aGVsbG8=", mimeType="image/png"), role="assistant"),
+                Message(EmbeddedResource(type="resource", resource=TextResourceContents(
+                    uri="fixture://embedded", mimeType="text/plain", text="embedded text",
+                ))),
+            ])
+
+        @server.prompt
+        def large_prompt() -> PromptResult:
+            return PromptResult("文" * 1000)
 
         if variant == "changed":
             @server.tool(name="search")

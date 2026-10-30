@@ -22,13 +22,15 @@ from tests.models import ScriptedModel
 
 def settings(**servers):
     return MCPConfig.model_validate({"servers": {name: {"transport": "http",
-                                                       "url": "http://127.0.0.1:8000/mcp", **definition}
-                                                for name, definition in servers.items()}})
+                                                       "url": f"http://127.0.0.1:{8000 + index}/mcp", **definition}
+                                                for index, (name, definition) in enumerate(servers.items())}})
 
 
 def in_memory_registry(monkeypatch, config, servers, **kwargs):
     registry = MCPRegistry(config, **kwargs)
-    monkeypatch.setattr(registry, "_make_adapter", lambda name: MCPAdapter(Client(servers[name], elicitation_handler=cancel_elicitation)))
+    by_url = {str(definition.url): servers[name] for name, definition in config.servers.items()}
+    monkeypatch.setattr("rs_harness.mcp.StreamableHttpTransport",
+                        lambda url, *args, **kwargs: by_url[str(url)])
     return registry
 
 
@@ -149,6 +151,138 @@ async def test_empty_parallel_duplicate_and_same_raw_names(monkeypatch, tmp_path
         await registry.connect("https://attacker.example", {})
 
 
+async def test_resource_and_prompt_operations_require_enabled_server(monkeypatch, tmp_path):
+    log = tmp_path / "calls.jsonl"
+    registry = in_memory_registry(monkeypatch, settings(docs={}), {"docs": make_server("docs", log)},
+                                  max_output_bytes=8192)
+    with pytest.raises(ToolException, match="mcp_server_not_connected"):
+        await registry.read_resource("docs", "fixture://catalog", {})
+    catalog = await registry.connect("docs", {})
+    state = {"mcp_connections": {"docs": catalog.record}}
+    resources = {item["uri"]: item for item in catalog.record["resources"]["items"]}
+    assert catalog.record["resources"]["status"] == "ok"
+    assert resources["fixture://catalog"]["mime_type"] == "application/json"
+    prompt = next(item for item in catalog.record["prompts"]["items"] if item["name"] == "guide")
+    assert prompt["arguments"] == [{"name": "topic", "description": None, "required": False}]
+
+    resource = json.loads(await registry.read_resource("docs", "fixture://catalog", state))
+    assert resource["kind"] == "resource"
+    assert resource["item_count"] == 1 and resource["end"] is True
+    assert '{"schema_version":"fixture","tasks":[]}' in resource["content"]
+    assert "fixture://catalog" in resource["content"]
+    prompt = json.loads(await registry.get_prompt("docs", "guide", {"topic": "resources"}, state))
+    assert prompt["kind"] == "prompt" and prompt["item_count"] == 1
+    assert "Read resources guidance before analysis." in prompt["content"]
+    assert '"role":"user"' in prompt["content"]
+    blob = json.loads(await registry.read_resource("docs", "fixture://blob", state))
+    assert "non-text content omitted" in blob["content"] and blob["item_count"] == 1
+
+    with pytest.raises(ToolException, match="mcp_unknown_server"):
+        await registry.read_resource("missing", "fixture://catalog", state)
+    with pytest.raises(ToolException, match="mcp_invalid_resource_uri"):
+        await registry.read_resource("docs", "not a uri", state)
+
+
+async def test_content_provenance_empty_and_mixed_parts(monkeypatch):
+    registry = in_memory_registry(monkeypatch, settings(docs={}), {"docs": make_server("docs")},
+                                  max_output_bytes=8192)
+    catalog = await registry.connect("docs", {})
+    state = {"mcp_connections": {"docs": catalog.record}}
+
+    mixed = json.loads(await registry.read_resource("docs", "fixture://mixed", state))
+    assert mixed["item_count"] == 3
+    assert "before blob" in mixed["content"] and "after blob" in mixed["content"]
+    assert "non-text content omitted" in mixed["content"]
+    assert "application/octet-stream" in mixed["content"] and "text/markdown" in mixed["content"]
+    empty = json.loads(await registry.read_resource("docs", "fixture://empty", state))
+    assert empty["item_count"] == 0 and "no content parts" in empty["content"]
+    empty_text = json.loads(await registry.read_resource("docs", "fixture://empty-text", state))
+    assert empty_text["item_count"] == 1 and "[empty text]" in empty_text["content"]
+
+    conversation = json.loads(await registry.get_prompt("docs", "conversation", None, state))
+    assert conversation["item_count"] == 2
+    assert '"role":"user"' in conversation["content"] and '"role":"assistant"' in conversation["content"]
+    assert "user text" in conversation["content"] and "assistant text" in conversation["content"]
+    mixed_prompt = json.loads(await registry.get_prompt("docs", "mixed_prompt", None, state))
+    assert "before image" in mixed_prompt["content"] and "embedded text" in mixed_prompt["content"]
+    assert "fixture://embedded" in mixed_prompt["content"] and "non-text content omitted" in mixed_prompt["content"]
+    empty_prompt = json.loads(await registry.get_prompt("docs", "empty_prompt", None, state))
+    assert empty_prompt["item_count"] == 0 and "no messages" in empty_prompt["content"]
+    empty_text_prompt = json.loads(await registry.get_prompt("docs", "empty_text_prompt", None, state))
+    assert empty_text_prompt["item_count"] == 1 and "[empty text]" in empty_text_prompt["content"]
+
+
+@pytest.mark.parametrize("kind", ["resource", "prompt"])
+async def test_pagination_reconstructs_canonical_content(monkeypatch, kind):
+    registry = in_memory_registry(monkeypatch, settings(docs={}), {"docs": make_server("docs")},
+                                  max_output_bytes=8192)
+    catalog = await registry.connect("docs", {})
+    state = {"mcp_connections": {"docs": catalog.record}}
+
+    async def read(offset=0, limit=None):
+        if kind == "resource":
+            return await registry.read_resource("docs", "fixture://large", state, offset=offset, limit=limit)
+        return await registry.get_prompt("docs", "large_prompt", None, state, offset=offset, limit=limit)
+
+    full = json.loads(await read())
+    assert full["truncated"] is False and full["next_offset"] is None
+    offset = 0
+    fragments = []
+    while True:
+        raw = await read(offset=offset, limit=512)
+        assert len(raw.encode("utf-8")) <= 512
+        page = json.loads(raw)
+        assert page["offset"] == offset
+        fragments.append(page["content"])
+        next_offset = page["next_offset"]
+        if next_offset is None:
+            assert page["end"] is True and page["truncated"] is False
+            break
+        assert next_offset > offset
+        assert page["truncated"] is True and str(next_offset) in page["continuation"]
+        offset = next_offset
+    assert "".join(fragments) == full["content"]
+
+    text_index = full["content"].index("文")
+    boundary = len(full["content"][:text_index].encode("utf-8"))
+    with pytest.raises(ToolException, match="mcp_invalid_offset"):
+        await read(offset=boundary + 1, limit=512)
+    with pytest.raises(ToolException, match="mcp_invalid_offset"):
+        await read(offset=full["total_bytes"] + 1)
+    with pytest.raises(ToolException, match="mcp_invalid_limit"):
+        await read(limit=0)
+    with pytest.raises(ToolException, match="mcp_invalid_limit"):
+        await read(limit=8193)
+    with pytest.raises(ToolException, match="mcp_output_limit_too_small"):
+        await read(limit=64)
+    end = json.loads(await read(offset=full["total_bytes"], limit=512))
+    assert end["content"] == "" and end["end"] is True
+
+
+@pytest.mark.parametrize("operation", ["resource", "prompt"])
+async def test_resource_connection_failure_is_redacted(monkeypatch, operation):
+    server = make_server("docs")
+    attempts = 0
+
+    def transport(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return server
+        raise OSError("SECRET")
+
+    monkeypatch.setattr("rs_harness.mcp.StreamableHttpTransport", transport)
+    registry = MCPRegistry(settings(docs={}))
+    catalog = await registry.connect("docs", {})
+    state = {"mcp_connections": {"docs": catalog.record}}
+    with pytest.raises(ToolException, match="mcp_call_failed") as error:
+        if operation == "resource":
+            await registry.read_resource("docs", "fixture://catalog", state)
+        else:
+            await registry.get_prompt("docs", "guide", None, state)
+    assert "SECRET" not in str(error.value)
+
+
 async def test_missing_secret_and_rotation(monkeypatch):
     config = settings(docs={"bearer_token_env": "RSH_MISSING_TEST_TOKEN"})
     registry = MCPRegistry(config)
@@ -162,7 +296,7 @@ async def test_missing_secret_and_rotation(monkeypatch):
     assert "secret" not in json.dumps(config.model_dump(mode="json"))
 
 
-@pytest.mark.parametrize("change", ["removed", "policy", "schema", "unavailable"])
+@pytest.mark.parametrize("change", ["removed", "policy", "schema", "resource_schema", "prompt_schema", "unavailable"])
 async def test_restore_fails_before_execution(monkeypatch, tmp_path, change):
     log = tmp_path / "events"
     config = settings(docs={})
@@ -173,7 +307,9 @@ async def test_restore_fails_before_execution(monkeypatch, tmp_path, change):
         config = MCPConfig()
     if change == "policy":
         config = settings(docs={"tools": {"search": "confirm"}})
-    restored = in_memory_registry(monkeypatch, config, {"docs": make_server("docs", log, variant="changed" if change == "schema" else "original")})
+    variant = {"schema": "changed", "resource_schema": "changed_resource",
+               "prompt_schema": "changed_prompt"}.get(change, "original")
+    restored = in_memory_registry(monkeypatch, config, {"docs": make_server("docs", log, variant=variant)})
     if change == "unavailable":
         monkeypatch.setattr(restored, "_make_adapter", lambda name: (_ for _ in ()).throw(OSError("SECRET")))
     with pytest.raises(MCPRecoveryError) as error:

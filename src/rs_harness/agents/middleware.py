@@ -72,9 +72,27 @@ class PermissionMiddleware(AgentMiddleware):
 
     def _hitl(self, state):
         rules = dict(self.local_rules)
-        if self.mcp is not None:
-            for name, entry in self.mcp.entries(state).items():
-                rules[name] = {"allowed_decisions": ["approve", "reject"]} if self.mcp.requires_approval(entry) else False
+        registry = self.mcp
+        if registry is not None:
+            for name, entry in registry.entries(state).items():
+                rules[name] = {"allowed_decisions": ["approve", "reject"]} if registry.requires_approval(entry) else False
+            for tool_name, kind, argument in (
+                ("read_mcp_resource", "resources", "uri"),
+                ("get_mcp_prompt", "prompts", "name"),
+            ):
+                def when(request, *, kind=kind, argument=argument):
+                    args = request.tool_call.get("args", {})
+                    if not isinstance(args, dict):
+                        return False
+                    server = args.get("server")
+                    target = args.get(argument)
+                    if not isinstance(server, str) or not isinstance(target, str):
+                        return False
+                    if server not in request.state.get("mcp_connections", {}):
+                        return False
+                    return registry.requires_capability_approval(server, kind, target)
+
+                rules[tool_name] = {"allowed_decisions": ["approve", "reject"], "when": when}
         return HumanInTheLoopMiddleware(interrupt_on=rules)
 
     def after_model(self, state, runtime):

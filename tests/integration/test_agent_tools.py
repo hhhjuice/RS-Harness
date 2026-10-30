@@ -43,7 +43,8 @@ async def test_selected_tools_match_model_and_context(config, tmp_path, selected
     assert ("SubagentBatchMiddleware" in middleware) == ("delegate_task" in selected)
     assert ("TodoListMiddleware" in middleware) == ("write_todos" in selected)
     assert ("SkillMiddleware" in middleware) == ("load_skill" in selected)
-    assert middleware["MCPMiddleware"].registry.local_names == set(MAIN_AGENT_TOOLS) | {"connect_mcp"}
+    assert middleware["MCPMiddleware"].registry.local_names == set(MAIN_AGENT_TOOLS) | {
+        "connect_mcp", "read_mcp_resource", "get_mcp_prompt"}
     usage = await get_context_usage(config, session.session_id)
     counts = {item.key: item.tokens for item in usage.categories}
     assert (counts["tool_schemas"] > 0) == bool(selected)
@@ -167,9 +168,11 @@ async def test_empty_builtin_list_keeps_mcp_tools_and_approval(config, tmp_path,
         result = await resume(config, session.session_id, decide(result, {"type": "approve"}), model=model)
     assert result.status == "succeeded", result.error
     assert successful_calls(tmp_path / "docs.jsonl") == ["search"]
-    assert {tool.name for tool in model.tool_history[0]} == {"connect_mcp"}
-    assert {tool.name for tool in model.bound_tools} == {"connect_mcp", "mcp__docs__search", "mcp__docs__get_version"}
+    assert {tool.name for tool in model.tool_history[0]} == {"connect_mcp", "read_mcp_resource", "get_mcp_prompt"}
+    assert {tool.name for tool in model.bound_tools} == {
+        "connect_mcp", "read_mcp_resource", "get_mcp_prompt", "mcp__docs__search", "mcp__docs__get_version"}
     request = build_agent_components(config, workdir=str(tmp_path)).context_request((await snapshot(config, session)).values)
+    assert request.system_message.content == model.inputs[-1][0].content
     actual = [convert_to_openai_tool(tool) for tool in request.tools]
     expected = [convert_to_openai_tool(tool) for tool in model.bound_tools]
     # Saved MCP schemas are sorted; discovery order need not be alphabetical.

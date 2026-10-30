@@ -44,8 +44,11 @@ def config(tmp_path: Path) -> Config:
 
 @pytest.fixture
 def skills_config(config):
-    source = Path(__file__).resolve().parents[1] / ".agents/skills/find-skills/SKILL.md"
-    target = config.runtime.skills_dir / "find-skills/SKILL.md"
+    target = config.runtime.skills_dir / "fixture-skill/SKILL.md"
     target.parent.mkdir(parents=True)
-    target.write_bytes(source.read_bytes())
+    target.write_text(
+        "---\nname: fixture-skill\ndescription: Fixture skill for integration tests\n---\n"
+        "FIXTURE-SKILL-BODY\nFIXTURE-INSTALL-EXAMPLE\n",
+        encoding="utf-8",
+    )
     return config

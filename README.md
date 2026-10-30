@@ -8,13 +8,13 @@
 
 阶段 9 增加 `/context` 上下文用量面板：离线读取当前主会话，按系统提示、用户消息、模型回复、工具定义、工具返回、Skill 和图片分类估算 token，用紧凑表格和进度条展示已用、总容量、剩余和占用百分比。模型提供输入用量时自动校准估算，容量支持自动识别及 `model.context_window` 覆盖。设计、接口和验收记录见 [阶段九开发文档](<./docs/v0.0.9——上下文用量面板.md>)。
 
-服务连接配置不包含 `description`：stdio 配置 `command` / `args` 等连接参数，HTTP 配置 `url`。连接前目录只展示服务 ID；连接后工具的说明和参数 schema 来自 MCP `tools/list`，由官方适配器转换。
+服务连接配置不包含 `description`：stdio 配置 `command` / `args` 等连接参数，HTTP 配置 `url`。连接前目录只展示服务 ID；`connect_mcp` 在同一连接中发现 tools、resources、prompts，连接后模型只看到实际可用的能力及参数定义。真实空目录、不支持和发现失败分别记录，不把 tools-only 服务描述成支持资源或提示词。
 
-MCP 连接成功后，服务提供的已发现工具默认 `allow`，无需逐项配置。可选的 `tools` 权限表以远端原始工具名为键；只有显式配置为 `confirm` 的工具需要审批，整个 `tools` 表可以省略，也保留显式 `allow` 的支持。远端工具的只读声明和描述不能覆盖显式审批策略。凭据只通过 `bearer_token_env` 或 stdio 的 `env_from_env` 引用宿主环境变量；不要把密钥放进工具参数。stdio 使用参数数组，`cwd` 相对配置文件目录解析。MCP 不进入子代理工具集合。
+MCP 连接成功后，已发现能力默认 `allow`，无需逐项配置。可选的 `tools`、`resources`、`prompts` 权限表分别以远端原始工具名、资源 URI、提示词名称为键；只有显式配置为 `confirm` 的调用需要审批，三张表均可省略，也保留显式 `allow`。批准前不会读取资源或获取提示词，同一批次可独立批准或拒绝不同调用。远端只读声明和描述不能覆盖宿主策略。凭据只通过 `bearer_token_env` 或 stdio 的 `env_from_env` 引用宿主环境变量；不要把密钥放进工具参数。stdio 使用参数数组，`cwd` 相对配置文件目录解析。MCP 不进入子代理工具集合。
 
-“已连接”表示当前会话已发现并启用工具；stdio 发现和调用结束后会释放进程，服务应自行持久化业务状态。主图每次重建时校验连接配置与模型可见工具目录；配置、策略或目录变化后应新建会话，临时故障可排除后重试原审批。审批查询只读 Checkpoint，不启动服务。MCP 调用失败后不会自动重试；超时可能已产生副作用，应先核对结果。交互式 MCP 输入请求会被取消，本版不支持 OAuth 登录流程、prompts/resources 或目录热更新。
+“已连接”表示当前会话已发现并启用能力；stdio 发现和调用结束后会释放进程，服务应自行持久化业务状态。主图每次重建时校验连接配置与模型可见目录；配置、策略或目录变化后应新建会话，临时故障可排除后重试原审批。审批查询只读 Checkpoint，不启动服务。MCP 调用失败后不会自动重试；超时可能已产生副作用，应先核对结果。交互式 MCP 输入请求会被取消，本版不支持 OAuth 登录流程或目录热更新。
 
-MCP 生产调用使用异步 `ask` / `resume`；直接调用图时使用 `ainvoke`。`mcp.timeout_s` 限制发现及调用，`runtime.max_tool_output_bytes` 限制 MCP 正文、错误文本与结构化 artifact；超限时保留执行状态并报告输出省略。实现与验收记录见 [阶段八实施文档](<./docs/v0.0.8——MCP Tools.md>)。
+MCP 生产调用使用异步 `ask` / `resume`；直接调用图时使用 `ainvoke`。`mcp.timeout_s` 限制发现及调用，`runtime.max_tool_output_bytes` 限制 MCP 正文、错误文本与结构化 artifact；普通远端工具超限时保留执行状态并报告输出省略。`read_mcp_resource` 和 `get_mcp_prompt` 返回带 `offset`、`next_offset`、`total_bytes`、`truncated` 的 JSON 页面，使用 `next_offset` 续读；`limit` 限制包含页面元数据在内的总 UTF-8 字节。多部分结果保留 URI、MIME、part/message 索引和 role，混合内容保留文本并标记非文本省略，空结果不会返回裸空字符串。实现与历史验收记录见 [阶段八实施文档](<./docs/v0.0.8——MCP Tools.md>)。
 
 使用 `rsh list-mcp`，或在交互提示符输入 `/mcp`，以单个圆角面板查看当前配置中的全部 MCP 服务和工具。顶部汇总服务及工具数量，内部按服务分组展示名称、传输类型、工具数量，以及各工具的原名、allow/confirm 策略和完整说明；不展示 Input schema、内部调用前缀或连接配置。说明合并多余空白后自动换行，不再截断到 120 个字符；空说明显示 `—`，空工具服务显示 `No tools exposed.`。面板最多 100 列，不足 72 列时将工具说明移至名称和权限下方。终端控制字符转义为可见文本，远端文本不解析为样式；重定向及 `NO_COLOR` 下不输出 ANSI 样式。
 
