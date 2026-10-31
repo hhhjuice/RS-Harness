@@ -34,6 +34,22 @@ def test_docs_search_and_version(live_config_path, tmp_path):
         assert any("mcp__docs__search" in item["names"] for item in data["tool_sets"])
 
 
+def test_resource_and_prompt_discovery_driven_calls(live_config_path, tmp_path):
+    log = tmp_path / "docs.jsonl"
+    mcp = stdio_config(log).model_dump(mode="json")
+    data = live_request(live_config_path, tmp_path, mcp, text=(
+        "连接 docs，从连接后的实际目录中选择 JSON 任务目录资源和带 topic 参数的阅读指导提示词，各调用一次。"
+        "topic 使用 resources。不要调用其他 MCP 工具。最后说明读取到的 schema_version 和提示词内容。"
+    ))
+    assert data["result"]["status"] == "succeeded", data["result"]
+    tools = {item["name"] for item in data["messages"] if item["type"] == "tool" and item["status"] == "success"}
+    assert {"connect_mcp", "read_mcp_resource", "get_mcp_prompt"} <= tools
+    assert sum(item["event"] == "read_resource" for item in events(log)) >= 1
+    assert sum(item["event"] == "get_prompt" for item in events(log)) >= 1
+    assert calls(log) == []
+    assert "fixture" in data["result"]["answer"] and "resources guidance" in data["result"]["answer"]
+
+
 def test_deploy_status_without_trigger(live_config_path, tmp_path):
     log = tmp_path / "deploy.jsonl"
     mcp = stdio_config(log, kind="deploy", tools={"trigger": "confirm"}).model_dump(mode="json")
@@ -81,7 +97,10 @@ def test_skill_base_mcp_and_delegation_compose(live_config_path, tmp_path):
     skill.parent.mkdir(parents=True)
     skill.write_text("---\nname: fixture-skill\ndescription: Read a fixture note and summarize it.\n---\nUse read_file on notes.txt and summarize its text. Do not run shell commands.\n")
     (tmp_path / "notes.txt").write_text("MCP fixture composition evidence: eight.")
-    child_id = Config.load(live_config_path).subagents[0].id
+    live_config = Config.load(live_config_path)
+    if not live_config.subagents:
+        pytest.skip("live config has no subagents")
+    child_id = live_config.subagents[0].id
     data = live_request(live_config_path, tmp_path, mcp, text=(
         "请按顺序完成：主代理调用 load_skill 加载 fixture-skill，调用 read_file 读取 notes.txt；"
         "连接 docs 后搜索 agent hooks；然后委派一次给 " + child_id + "，让它只读取 notes.txt 并总结内容，不连接或使用 MCP。"
@@ -91,7 +110,8 @@ def test_skill_base_mcp_and_delegation_compose(live_config_path, tmp_path):
     tools = {item["name"] for item in data["messages"] if item["type"] == "tool" and item["status"] == "success"}
     assert {"load_skill", "read_file", "connect_mcp", "mcp__docs__search", "delegate_task"} <= tools
     child_sets = [item["names"] for item in data["tool_sets"] if item["child"]]
-    assert child_sets and all(not any(name == "connect_mcp" or name.startswith("mcp__") for name in names) for names in child_sets)
+    forbidden = {"connect_mcp", "read_mcp_resource", "get_mcp_prompt"}
+    assert child_sets and all(not any(name in forbidden or name.startswith("mcp__") for name in names) for names in child_sets)
     assert calls(log) == ["search"]
 
 

@@ -43,7 +43,8 @@ async def main():
                 return await handler(request)
 
             async def awrap_tool_call(self, request, handler):
-                allowed = {"connect_mcp", "read_file", "load_skill", "write_todos", "delegate_task",
+                allowed = {"connect_mcp", "read_mcp_resource", "get_mcp_prompt",
+                           "read_file", "load_skill", "write_todos", "delegate_task",
                            "mcp__docs__search", "mcp__docs__get_version", "mcp__deploy__status",
                            "mcp__deploy__trigger", "mcp__deploy__unlisted", "mcp__all__picture"}
                 if request.tool_call["name"] not in allowed:

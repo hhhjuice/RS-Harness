@@ -62,10 +62,10 @@ tools = ["read_file", "write_file", "edit_file", "glob", "bash", "read_image", "
 # skills = [] # 关闭该子 Agent 的全部 Skill。
 persistence = "per_invocation"
 
-# 可选 MCP 服务：取消注释并替换为实际服务。只向主 Agent 提供工具。
-# 启动不联网；模型调用 connect_mcp(name) 后才发现工具。
-# 连接后所有已发现工具默认 allow，无需逐项配置；仅需审批的工具配置 confirm。
-# tools 中使用远端原始工具名，整个 tools 表可省略。
+# 可选 MCP 服务：取消注释并替换为实际服务。只向主 Agent 提供 MCP 能力。
+# 启动不联网；模型调用 connect_mcp(name) 后才发现工具、资源和提示词。
+# 连接后所有已发现能力默认 allow，无需逐项配置；仅需审批的调用配置 confirm。
+# tools 使用远端原始工具名，resources 使用资源 URI，prompts 使用提示词名称；三张表均可省略。
 # [mcp]
 # timeout_s = 30
 #
@@ -83,3 +83,9 @@ persistence = "per_invocation"
 #
 # [mcp.servers.deploy.tools]
 # trigger = "confirm"
+#
+# [mcp.servers.docs.resources]
+# "internal://catalog" = "confirm"
+#
+# [mcp.servers.docs.prompts]
+# guide = "confirm"

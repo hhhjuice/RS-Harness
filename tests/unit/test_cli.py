@@ -224,7 +224,7 @@ def test_skill_command_scan_error_keeps_interactive_loop(config, tmp_path, skill
     assert not config.runtime.sessions_dir.exists()
 
 
-@pytest.mark.parametrize("command", ["/skill find-skills", "/skill --refresh"])
+@pytest.mark.parametrize("command", ["/skill fixture-skill", "/skill --refresh"])
 def test_skill_command_rejects_arguments(config, tmp_path, skill_runner, command):
     result = skill_runner.invoke(app, ["--config", str(tmp_path / "config.toml")], input=f"{command}\n/quit\n")
     assert result.exit_code == 0, result.output

@@ -79,6 +79,146 @@ async def test_lazy_binding_and_untrusted_same_batch(config, tmp_path, monkeypat
     assert "http://127.0.0.1" not in trajectory
 
 
+@pytest.mark.parametrize("policies", [
+    {},
+    {"resources": {"fixture://catalog": "allow"}, "prompts": {"guide": "allow"}},
+])
+async def test_resource_and_prompt_bridges_follow_connection(config, tmp_path, monkeypatch, policies):
+    install_servers(monkeypatch, tmp_path, ("docs",))
+    config = config.model_copy(update={"mcp": settings(docs=policies)})
+    session = create_session(config, workdir=str(tmp_path))
+    model = ScriptedModel([
+        response(call("connect_mcp", {"name": "docs"}, "connect"),
+                 call("read_mcp_resource", {"server": "docs", "uri": "fixture://catalog"}, "too_soon")),
+        response(call("read_mcp_resource", {"server": "docs", "uri": "fixture://catalog"}, "resource"),
+                 call("get_mcp_prompt", {"server": "docs", "name": "guide", "arguments": {"topic": "resources"}}, "prompt"),
+                 call("read_mcp_resource", {"server": "docs", "uri": "not a uri"}, "invalid_uri")),
+        AIMessage(content="done"),
+    ])
+
+    result = await ask(config, session.session_id, "read public contracts", model=model)
+
+    assert result.status == "succeeded", result.error
+    first, second, last = [{tool.name for tool in batch} for batch in model.tool_history]
+    assert {"connect_mcp", "read_mcp_resource", "get_mcp_prompt"} <= first
+    assert not any(name.startswith("mcp__") for name in first)
+    assert second == last == first | {"mcp__docs__search", "mcp__docs__get_version"}
+    messages = {message.tool_call_id: message for message in model.inputs[-1] if isinstance(message, ToolMessage)}
+    assert messages["too_soon"].status == "error"
+    assert "mcp_server_not_connected" in str(messages["too_soon"].content)
+    assert messages["invalid_uri"].status == "error"
+    assert "mcp_invalid_resource_uri" in str(messages["invalid_uri"].content)
+    assert messages["resource"].status == messages["prompt"].status == "success"
+    resource = json.loads(messages["resource"].content)
+    prompt = json.loads(messages["prompt"].content)
+    assert '{"schema_version":"fixture"' in resource["content"]
+    assert "Read resources guidance before analysis." in prompt["content"]
+    systems = [str(batch[0].content) for batch in model.inputs]
+    assert "read_mcp_resource" not in systems[0] and "get_mcp_prompt" not in systems[0]
+    assert all("read_mcp_resource" in text and "get_mcp_prompt" in text for text in systems[1:])
+    assert "fixture://catalog" in systems[1] and "guide" in systems[1]
+
+
+async def test_tools_only_catalog_does_not_advertise_resource_or_prompt_access(config, tmp_path, monkeypatch):
+    install_servers(monkeypatch, tmp_path, ("deploy",))
+    config = config.model_copy(update={"mcp": settings(deploy={})})
+    session = create_session(config, workdir=str(tmp_path))
+    model = ScriptedModel([
+        response(call("connect_mcp", {"name": "deploy"}, "connect")),
+        AIMessage(content="done"),
+    ])
+
+    result = await ask(config, session.session_id, "connect", model=model)
+
+    assert result.status == "succeeded", result.error
+    systems = [str(batch[0].content) for batch in model.inputs]
+    assert all("read_mcp_resource" not in text and "get_mcp_prompt" not in text for text in systems)
+    connected = str(model.inputs[-1][0].content)
+    assert "resources: empty" in connected and "prompts: empty" in connected
+
+
+@pytest.mark.parametrize("kind", ["resource", "prompt"])
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+async def test_resource_and_prompt_require_approval_before_access(config, tmp_path, monkeypatch, kind, decision):
+    install_servers(monkeypatch, tmp_path, ("docs",))
+    policies = ({"resources": {"fixture://catalog": "confirm"}} if kind == "resource"
+                else {"prompts": {"guide": "confirm"}})
+    config = config.model_copy(update={"mcp": settings(docs=policies)})
+    session = create_session(config, workdir=str(tmp_path))
+    tool_name = "read_mcp_resource" if kind == "resource" else "get_mcp_prompt"
+    arguments = ({"server": "docs", "uri": "fixture://catalog"} if kind == "resource"
+                 else {"server": "docs", "name": "guide"})
+    model = ScriptedModel([
+        response(call("connect_mcp", {"name": "docs"}, "connect")),
+        response(call(tool_name, arguments, "action")),
+        AIMessage(content="done"),
+    ])
+
+    pending = await ask(config, session.session_id, "read", model=model)
+
+    assert pending.status == "interrupted", pending.error
+    assert [item["name"] for item in pending.interrupts[0]["action_requests"]] == [tool_name]
+    event_name = "read_resource" if kind == "resource" else "get_prompt"
+    log = tmp_path / "docs.jsonl"
+    assert not any(item["event"] == event_name for item in events(log))
+    result = await resume(config, session.session_id, decide(pending, {"type": decision}), model=model)
+    assert result.status == "succeeded", result.error
+    message = next(item for item in model.inputs[-1] if isinstance(item, ToolMessage) and item.tool_call_id == "action")
+    assert message.status == ("success" if decision == "approve" else "error")
+    assert sum(item["event"] == event_name for item in events(log)) == (1 if decision == "approve" else 0)
+
+
+async def test_resource_and_prompt_approvals_have_independent_batch_decisions(config, tmp_path, monkeypatch):
+    install_servers(monkeypatch, tmp_path, ("docs",))
+    config = config.model_copy(update={"mcp": settings(docs={
+        "resources": {"fixture://catalog": "confirm"}, "prompts": {"guide": "confirm"},
+    })})
+    session = create_session(config, workdir=str(tmp_path))
+    model = ScriptedModel([
+        response(call("connect_mcp", {"name": "docs"}, "connect")),
+        response(call("read_mcp_resource", {"server": "docs", "uri": "fixture://catalog"}, "resource"),
+                 call("get_mcp_prompt", {"server": "docs", "name": "guide"}, "prompt")),
+        AIMessage(content="done"),
+    ])
+
+    pending = await ask(config, session.session_id, "read", model=model)
+
+    assert pending.status == "interrupted", pending.error
+    assert [item["name"] for item in pending.interrupts[0]["action_requests"]] == [
+        "read_mcp_resource", "get_mcp_prompt",
+    ]
+    log = tmp_path / "docs.jsonl"
+    assert not any(item["event"] in {"read_resource", "get_prompt"} for item in events(log))
+    result = await resume(config, session.session_id, decide(
+        pending, {"type": "approve"}, {"type": "reject"},
+    ), model=model)
+    assert result.status == "succeeded", result.error
+    assert sum(item["event"] == "read_resource" for item in events(log)) == 1
+    assert not any(item["event"] == "get_prompt" for item in events(log))
+    messages = {item.tool_call_id: item for item in model.inputs[-1] if isinstance(item, ToolMessage)}
+    assert messages["resource"].status == "success" and messages["prompt"].status == "error"
+
+
+async def test_malformed_bridge_call_uses_tool_validation_before_approval(config, tmp_path, monkeypatch):
+    install_servers(monkeypatch, tmp_path, ("docs",))
+    config = config.model_copy(update={"mcp": settings(docs={
+        "resources": {"fixture://catalog": "confirm"},
+    })})
+    session = create_session(config, workdir=str(tmp_path))
+    model = ScriptedModel([
+        response(call("connect_mcp", {"name": "docs"}, "connect")),
+        response(call("read_mcp_resource", {"server": "docs"}, "malformed")),
+        AIMessage(content="done"),
+    ])
+
+    result = await ask(config, session.session_id, "read", model=model)
+
+    assert result.status == "succeeded", result.error
+    message = next(item for item in model.inputs[-1] if isinstance(item, ToolMessage) and item.tool_call_id == "malformed")
+    assert message.status == "error"
+    assert not any(item["event"] == "read_resource" for item in events(tmp_path / "docs.jsonl"))
+
+
 @pytest.mark.parametrize("decisions", [("approve", "reject"), ("reject", "approve"), ("reject", "reject")])
 async def test_mixed_approval_and_explicit_confirm(config, tmp_path, monkeypatch, decisions):
     install_servers(monkeypatch, tmp_path)
@@ -155,7 +295,18 @@ async def test_real_transports_sdk_aliases_pagination_and_lifecycle(tmp_path, tr
         result = await catalog.entries["mcp__docs__get_version"].tool.ainvoke(call("mcp__docs__get_version", {}, "raw"))
         assert (result.name, result.tool_call_id, result.status) == ("mcp__docs__get_version", "raw", "success")
         assert result.content[0]["text"] == "docs-api-8"
+        state = {"mcp_connections": {"docs": catalog.record}}
+        resource = json.loads(await registry.read_resource("docs", "fixture://catalog", state))
+        prompt = json.loads(await registry.get_prompt("docs", "guide", None, state))
+        assert '{"schema_version":"fixture"' in resource["content"]
+        assert "Read hooks guidance before analysis." in prompt["content"]
+        assert any(item["uri"] == "fixture://catalog" for item in catalog.record["resources"]["items"])
+        assert any(item["name"] == "guide" for item in catalog.record["prompts"]["items"])
+        assert len(catalog.record["resources"]["items"]) == 6
+        assert len(catalog.record["prompts"]["items"]) == 6
         assert successful_calls(log) == ["get.version"]
+        assert sum(item["event"] == "read_resource" for item in events(log)) == 1
+        assert sum(item["event"] == "get_prompt" for item in events(log)) == 1
         return events(log)
 
     if transport == "stdio":
@@ -223,6 +374,32 @@ def process_request(tmp_path, mcp, **kwargs):
     return run_process(tmp_path / "config.toml", workdir=str(tmp_path), mcp=mcp.model_dump(mode="json"), **kwargs)
 
 
+def test_sqlite_new_process_resource_and_prompt_calls(config, tmp_path):
+    log = tmp_path / "docs.jsonl"
+    mcp = stdio_config(log)
+    first = process_request(tmp_path, mcp, responses=[
+        response(call("connect_mcp", {"name": "docs"}, "connect")).model_dump(),
+        AIMessage(content="connected").model_dump(),
+    ])["result"]
+    assert first["status"] == "succeeded", first
+
+    second = process_request(tmp_path, mcp, session_id=first["session_id"], responses=[
+        response(call("read_mcp_resource", {"server": "docs", "uri": "fixture://catalog"}, "resource"),
+                 call("get_mcp_prompt", {"server": "docs", "name": "guide"}, "prompt")).model_dump(),
+        AIMessage(content="done").model_dump(),
+    ])
+
+    assert second["result"]["status"] == "succeeded", second["result"]
+    messages = {item["tool_call_id"]: item for item in second["messages"] if item["type"] == "tool"}
+    resource = json.loads(messages["resource"]["content"])
+    prompt = json.loads(messages["prompt"]["content"])
+    assert '{"schema_version":"fixture"' in resource["content"]
+    assert "Read hooks guidance before analysis." in prompt["content"]
+    assert sum(item["event"] == "read_resource" for item in events(log)) == 1
+    assert sum(item["event"] == "get_prompt" for item in events(log)) == 1
+    assert successful_calls(log) == []
+
+
 @pytest.mark.parametrize("decision", ["approve", "reject"])
 def test_sqlite_new_process_approval_query_and_continuation(config, tmp_path, decision):
     log = tmp_path / "deploy.jsonl"
@@ -247,15 +424,21 @@ def test_sqlite_new_process_approval_query_and_continuation(config, tmp_path, de
     assert continued["result"]["status"] == "succeeded", continued
     assert "mcp__deploy__trigger" in continued["tool_history"][0]
     assert successful_calls(log).count("status") == 1  # graph rebuild does not replay tools
-    assert set(continued["connections"]["deploy"]) == {"config_digest", "catalog_digest", "tool_schemas"}
+    record = continued["connections"]["deploy"]
+    assert {"config_digest", "catalog_digest", "tool_schemas", "resources", "prompts"} <= set(record)
+    assert set(record["resources"]) == set(record["prompts"]) == {"status", "items"}
 
 
-@pytest.mark.parametrize("change", ["removed", "empty", "policy", "target", "schema", "unavailable"])
+@pytest.mark.parametrize("change", [
+    "removed", "empty", "policy", "resource_policy", "prompt_policy", "target",
+    "schema", "resource_schema", "prompt_schema", "unavailable",
+])
 def test_sqlite_recovery_refuses_changed_or_unavailable_server(config, tmp_path, change):
     log = tmp_path / "docs.jsonl"
     variant = tmp_path / "variant"
     variant.write_text("original")
-    mcp = stdio_config(log, variant_file=variant, tools={"search": "confirm"})
+    mcp = stdio_config(log, variant_file=variant, tools={"search": "confirm"},
+                       resources={"fixture://catalog": "confirm"}, prompts={"guide": "confirm"})
     pending = process_request(tmp_path, mcp, responses=[
         response(call("connect_mcp", {"name": "docs"}, "connect")).model_dump(),
         response(call("mcp__docs__search", {"query": "hooks"}, "search")).model_dump(),
@@ -268,10 +451,16 @@ def test_sqlite_recovery_refuses_changed_or_unavailable_server(config, tmp_path,
         changed = {} if change == "removed" else {"servers": {}}
     elif change == "policy":
         changed["servers"]["docs"]["tools"] = {}
+    elif change == "resource_policy":
+        changed["servers"]["docs"]["resources"] = {}
+    elif change == "prompt_policy":
+        changed["servers"]["docs"]["prompts"] = {}
     elif change == "target":
         changed["servers"]["docs"]["args"].append("--invalid")
     elif change == "schema":
         variant.write_text("changed")
+    elif change in {"resource_schema", "prompt_schema"}:
+        variant.write_text({"resource_schema": "changed_resource", "prompt_schema": "changed_prompt"}[change])
     elif change == "unavailable":
         # A stalled service keeps its routing config but cannot complete discovery.
         variant.write_text("slow_list")
@@ -305,6 +494,15 @@ async def test_transport_fault_is_redacted_before_callbacks(config, tmp_path, mo
     original_tools[0] = original_tools[0].model_copy(update={"coroutine": fail})
 
     class BrokenAdapter:
+        client = adapter.client
+
+        async def __aenter__(self):
+            await adapter.__aenter__()
+            return self
+
+        async def __aexit__(self, *args):
+            return await adapter.__aexit__(*args)
+
         async def list_tools(self, **kwargs):
             return original_tools
 
@@ -374,12 +572,15 @@ async def test_skill_todo_base_tools_and_child_isolation(skills_config, tmp_path
     config = skills_config.model_copy(update={"mcp": settings(docs={})})
     (tmp_path / "input.txt").write_text("local text")
     child = ScriptedModel([
-        response(call("connect_mcp", {"name": "docs"}, "child-connect"), call("mcp__docs__search", {"query": "forged"}, "child-mcp")),
+        response(call("connect_mcp", {"name": "docs"}, "child-connect"),
+                 call("mcp__docs__search", {"query": "forged"}, "child-mcp"),
+                 call("read_mcp_resource", {"server": "docs", "uri": "fixture://catalog"}, "child-resource"),
+                 call("get_mcp_prompt", {"server": "docs", "name": "guide"}, "child-prompt")),
         AIMessage(content="child could not access MCP"),
     ])
     parent = ScriptedModel([
         response(call("connect_mcp", {"name": "docs"}, "connect")),
-        response(call("load_skill", {"name": "find-skills"}, "skill"),
+        response(call("load_skill", {"name": "fixture-skill"}, "skill"),
                  call("read_file", {"path": "input.txt"}, "local"),
                  call("delegate_task", {"agent_id": "worker", "query": "Check available tools"}, "child")),
         response(call("write_todos", {"todos": [{"content": "Use MCP", "status": "in_progress"}]}, "todo")),
@@ -392,8 +593,11 @@ async def test_skill_todo_base_tools_and_child_isolation(skills_config, tmp_path
     assert result["messages"][-1].content == "done"
     assert result["todos"][0]["status"] == "completed"
     assert successful_calls(tmp_path / "docs.jsonl") == ["search"]
-    assert all(not any(item.name == "connect_mcp" or item.name.startswith("mcp__") for item in batch) for batch in child.tool_history)
-    assert {m.tool_call_id for m in child.inputs[-1] if isinstance(m, ToolMessage) and m.status == "error"} == {"child-connect", "child-mcp"}
+    forbidden = {"connect_mcp", "read_mcp_resource", "get_mcp_prompt"}
+    assert all(not any(item.name in forbidden or item.name.startswith("mcp__") for item in batch) for batch in child.tool_history)
+    assert {m.tool_call_id for m in child.inputs[-1] if isinstance(m, ToolMessage) and m.status == "error"} == {
+        "child-connect", "child-mcp", "child-resource", "child-prompt",
+    }
     assert not any(m.tool_call_id.startswith("child-") for m in result["messages"] if isinstance(m, ToolMessage))
     assert not any("Available MCP servers" in str(batch[0].content) for batch in child.inputs)
 

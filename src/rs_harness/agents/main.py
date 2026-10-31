@@ -71,7 +71,7 @@ def build_agent_components(
                 config, model=model, tools=base_tools, workdir=workdir, subagents=subagents, skills=skills,
             )
         )
-    mcp = MCPRegistry(config.mcp, local_names=[*MAIN_AGENT_TOOLS, "connect_mcp"],
+    mcp = MCPRegistry(config.mcp, local_names=[*MAIN_AGENT_TOOLS, "connect_mcp", "read_mcp_resource", "get_mcp_prompt"],
                       max_output_bytes=config.runtime.max_tool_output_bytes)
     return AgentComponents(
         system_prompt=config.system_prompt(workdir), tools=tools,

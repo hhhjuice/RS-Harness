@@ -13,13 +13,14 @@ from rs_harness.config import MCPConfig
 SERVER = Path(__file__).with_name("server.py")
 
 
-def stdio_config(log, *, kind="docs", variant_file=None, tools=None, timeout=10):
+def stdio_config(log, *, kind="docs", variant_file=None, tools=None, resources=None, prompts=None, timeout=10):
     args = [str(SERVER), "--kind", kind, "--log", str(log)]
     if variant_file:
         args.extend(["--variant-file", str(variant_file)])
     return MCPConfig.model_validate({"timeout_s": timeout, "servers": {kind: {
         "transport": "stdio", "command": sys.executable,
         "args": args, "cwd": str(SERVER.parent), "tools": tools or {},
+        "resources": resources or {}, "prompts": prompts or {},
     }}})
 
 

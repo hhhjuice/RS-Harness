@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from rs_harness.config import Config, ConfigError, ModelConfig, REASONING_EFFORTS, save_reasoning_effort
+from rs_harness.config import Config, ConfigError, MCPConfig, ModelConfig, REASONING_EFFORTS, save_reasoning_effort
 
 
 def test_config_resolves_paths_and_prompt(config):
@@ -89,6 +89,26 @@ def test_tool_limits_are_strict(config, field, value):
 
     with pytest.raises(ValueError):
         RuntimeConfig.model_validate({**config.runtime.model_dump(), field: value})
+
+
+def test_mcp_resource_and_prompt_policies():
+    config = MCPConfig.model_validate({"servers": {"docs": {
+        "transport": "http", "url": "http://127.0.0.1:8000/mcp",
+        "resources": {"fixture://catalog": "confirm", "fixture://public": "allow"},
+        "prompts": {"guide": "confirm"},
+    }, "empty": {"transport": "http", "url": "http://127.0.0.1:8001/mcp"}}})
+    docs = config.servers["docs"]
+    assert docs.resources == {"fixture://catalog": "confirm", "fixture://public": "allow"}
+    assert docs.prompts == {"guide": "confirm"}
+    assert config.servers["empty"].resources == config.servers["empty"].prompts == {}
+
+
+@pytest.mark.parametrize("kind", ["tools", "resources", "prompts"])
+def test_mcp_policy_rejects_unknown_decision(kind):
+    with pytest.raises(ValueError):
+        MCPConfig.model_validate({"servers": {"docs": {
+            "transport": "http", "url": "http://127.0.0.1:8000/mcp", kind: {"target": "deny"},
+        }}})
 
 
 @pytest.mark.parametrize("rendered", ["0", "-1", "true", "false", "1.0", "1.5", '"10"'])
